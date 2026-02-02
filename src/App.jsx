@@ -38,7 +38,8 @@ import {
   ChevronDown,
   Lock,
   Unlock,
-  Paintbrush
+  Paintbrush,
+  ScanLine
 } from 'lucide-react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -312,6 +313,60 @@ const App = () => {
             }
           }
         }
+        return newPixels;
+      }
+      if (tool === 'autoOutline' && isFirst) {
+        const startColorKey = JSON.stringify(prev[y][x]);
+        if (startColorKey === TRANSPARENT_KEY) {
+          return prev;
+        }
+
+        const fillColor = isTransparentMode ? [...TRANSPARENT_COLOR] : currentColor;
+        const newPixels = prev.map(r => [...r]);
+        
+        const islandPixels = new Set();
+        const outlinePixels = new Set();
+        const queue = [[x, y]];
+        const visited = new Set([`${x},${y}`]);
+
+        // Part 1: Find all pixels in the island
+        while (queue.length > 0) {
+          const [cx, cy] = queue.shift();
+          islandPixels.add(`${cx},${cy}`);
+
+          const neighbors = [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]];
+          for (const [nx, ny] of neighbors) {
+            const key = `${nx},${ny}`;
+            if (nx >= 0 && nx < newPixels[0].length && ny >= 0 && ny < newPixels.length && !visited.has(key)) {
+              visited.add(key);
+              if (JSON.stringify(newPixels[ny][nx]) !== TRANSPARENT_KEY) {
+                queue.push([nx, ny]);
+              }
+            }
+          }
+        }
+
+        // Part 2: Find the outline pixels
+        for (const pixelKey of islandPixels) {
+          const [cx, cy] = pixelKey.split(',').map(Number);
+          const neighbors = [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]];
+          for (const [nx, ny] of neighbors) {
+            if (nx >= 0 && nx < newPixels[0].length && ny >= 0 && ny < newPixels.length) {
+              if (JSON.stringify(newPixels[ny][nx]) === TRANSPARENT_KEY) {
+                outlinePixels.add(`${nx},${ny}`);
+              }
+            }
+          }
+        }
+
+        // Part 3: Paint the outline
+        if (outlinePixels.size === 0) return prev;
+
+        outlinePixels.forEach(pixelKey => {
+          const [ox, oy] = pixelKey.split(',').map(Number);
+          newPixels[oy][ox] = fillColor;
+        });
+
         return newPixels;
       }
       return prev;
@@ -764,6 +819,7 @@ const App = () => {
                     <button onClick={() => setTool('paste')} disabled={!clipboard} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='paste'?'bg-emerald-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300 disabled:opacity-10'}`}><ClipboardPaste size={18}/></button>
                     <button onClick={() => setTool('bucket')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bucket'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><PaintBucket size={18}/></button>
                     <button onClick={() => setTool('islandFill')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='islandFill'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Paintbrush size={18}/></button>
+                    <button onClick={() => setTool('autoOutline')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='autoOutline'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><ScanLine size={18}/></button>
                     <button onClick={() => setTool('dropper')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='dropper'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Pipette size={18}/></button>
                     <button onClick={() => setIsTransparentMode(!isTransparentMode)} className={`p-2.5 rounded-full transition-all shrink-0 ${isTransparentMode?'bg-white text-black':'text-slate-500 hover:text-slate-300'}`}><Circle size={16} strokeDasharray="3 3"/></button>
                   </div>
