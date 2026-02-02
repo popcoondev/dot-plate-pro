@@ -172,6 +172,20 @@ const App = () => {
     }
   }, [pixels === null, activeTab, showOriginal]);
 
+  useEffect(() => {
+    const preventScroll = (e) => e.preventDefault();
+    
+    if (isCanvasLocked) {
+      document.body.addEventListener('touchmove', preventScroll, { passive: false });
+    } else {
+      document.body.removeEventListener('touchmove', preventScroll);
+    }
+    
+    return () => {
+      document.body.removeEventListener('touchmove', preventScroll);
+    };
+  }, [isCanvasLocked]);
+
   const syncLayersFromPixels = useCallback((currentPixels) => {
     if (!currentPixels) { setLayerOrder([]); return; }
     const colorSet = new Set();
