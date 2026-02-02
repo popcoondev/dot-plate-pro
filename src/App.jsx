@@ -37,7 +37,8 @@ import {
   ChevronUp,
   ChevronDown,
   Lock,
-  Unlock
+  Unlock,
+  Paintbrush
 } from 'lucide-react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -280,6 +281,36 @@ const App = () => {
           if (visited.has(k) || cx < 0 || cy < 0 || cx >= prev[0].length || cy >= prev.length || JSON.stringify(newPixels[cy][cx]) !== targetKey) continue;
           visited.add(k); newPixels[cy][cx] = color;
           queue.push([cx+1, cy], [cx-1, cy], [cx, cy+1], [cx, cy-1]);
+        }
+        return newPixels;
+      }
+      if (tool === 'islandFill' && isFirst) {
+        const startColorKey = JSON.stringify(prev[y][x]);
+        const fillColor = isTransparentMode ? [...TRANSPARENT_COLOR] : currentColor;
+        const fillColorKey = JSON.stringify(fillColor);
+
+        if (startColorKey === TRANSPARENT_KEY || startColorKey === fillColorKey) {
+          return prev;
+        }
+
+        const newPixels = prev.map(r => [...r]);
+        const queue = [[x, y]];
+        const visited = new Set([`${x},${y}`]);
+        
+        while (queue.length > 0) {
+          const [cx, cy] = queue.shift();
+          newPixels[cy][cx] = fillColor;
+
+          const neighbors = [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]];
+          for (const [nx, ny] of neighbors) {
+            const key = `${nx},${ny}`;
+            if (nx >= 0 && nx < newPixels[0].length && ny >= 0 && ny < newPixels.length && !visited.has(key)) {
+              visited.add(key);
+              if (JSON.stringify(newPixels[ny][nx]) !== TRANSPARENT_KEY) {
+                queue.push([nx, ny]);
+              }
+            }
+          }
         }
         return newPixels;
       }
@@ -732,6 +763,7 @@ const App = () => {
                     <button onClick={() => setTool('select')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='select'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Square size={18}/></button>
                     <button onClick={() => setTool('paste')} disabled={!clipboard} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='paste'?'bg-emerald-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300 disabled:opacity-10'}`}><ClipboardPaste size={18}/></button>
                     <button onClick={() => setTool('bucket')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bucket'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><PaintBucket size={18}/></button>
+                    <button onClick={() => setTool('islandFill')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='islandFill'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Paintbrush size={18}/></button>
                     <button onClick={() => setTool('dropper')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='dropper'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Pipette size={18}/></button>
                     <button onClick={() => setIsTransparentMode(!isTransparentMode)} className={`p-2.5 rounded-full transition-all shrink-0 ${isTransparentMode?'bg-white text-black':'text-slate-500 hover:text-slate-300'}`}><Circle size={16} strokeDasharray="3 3"/></button>
                   </div>
