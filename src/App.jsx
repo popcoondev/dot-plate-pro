@@ -35,7 +35,9 @@ import {
   FileText,
   Circle,
   ChevronUp,
-  ChevronDown
+  ChevronDown,
+  Lock,
+  Unlock
 } from 'lucide-react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -111,6 +113,7 @@ const App = () => {
   const [showOriginal, setShowOriginal] = useState(false); 
 
   const [useVirtualPad, setUseVirtualPad] = useState(false);
+  const [isCanvasLocked, setIsCanvasLocked] = useState(false);
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 });
   const [isPlotting, setIsPlotting] = useState(false);
 
@@ -631,9 +634,18 @@ const App = () => {
               </div>
 
               <div className={`flex-1 flex ${showOriginal ? 'flex-col lg:flex-row' : 'flex-col'} overflow-hidden relative`}>
-                <div ref={scrollContainerRef} className={`flex-1 relative overflow-auto bg-slate-50/30 custom-scrollbar ${tool === 'hand' && !useVirtualPad ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`} 
-                  onMouseDown={startDrawingNormal} onMouseMove={drawMoveNormal} onMouseUp={stopDrawingNormal} onMouseLeave={stopDrawingNormal} 
-                  onTouchStart={startDrawingNormal} onTouchMove={drawMoveNormal} onTouchEnd={stopDrawingNormal}>
+                <div 
+                  ref={scrollContainerRef} 
+                  className={`flex-1 relative bg-slate-50/30 custom-scrollbar ${tool === 'hand' && !useVirtualPad ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`} 
+                  style={{ overflow: isCanvasLocked ? 'hidden' : 'auto' }}
+                  onMouseDown={startDrawingNormal} 
+                  onMouseMove={drawMoveNormal} 
+                  onMouseUp={stopDrawingNormal} 
+                  onMouseLeave={stopDrawingNormal} 
+                  onTouchStart={startDrawingNormal} 
+                  onTouchMove={drawMoveNormal} 
+                  onTouchEnd={stopDrawingNormal}
+                >
                   
                   {!pixels ? (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
@@ -673,6 +685,15 @@ const App = () => {
                     </div>
                   )}
                 </div>
+
+                {pixels && !useVirtualPad && (
+                  <button 
+                    onClick={() => setIsCanvasLocked(!isCanvasLocked)} 
+                    className={`absolute top-4 right-4 z-50 p-2.5 rounded-xl transition-all shadow-lg border ${isCanvasLocked ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white/50 backdrop-blur-md text-slate-700 border-white/20'}`}
+                  >
+                    {isCanvasLocked ? <Lock size={16} /> : <Unlock size={16} />}
+                  </button>
+                )}
 
                 {showOriginal && sourceImage && (
                   <div className="flex-1 relative overflow-auto bg-slate-100/50 border-t border-slate-100 custom-scrollbar text-center">
