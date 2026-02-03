@@ -149,6 +149,7 @@ const App = () => {
   const cursorSubPixelRef = useRef({ x: 0, y: 0 });
   const isLoadingRef = useRef(false);
   const pixelsRef = useRef(null);
+  const toolbarRef = useRef(null);
   
   useEffect(() => { pixelsRef.current = pixels; }, [pixels]);
 
@@ -183,7 +184,12 @@ const App = () => {
   }, [pixels === null, activeTab, showOriginal]);
 
   useEffect(() => {
-    const preventScroll = (e) => e.preventDefault();
+    const preventScroll = (e) => {
+      if (toolbarRef.current && toolbarRef.current.contains(e.target)) {
+        return;
+      }
+      e.preventDefault();
+    };
     
     if (isCanvasLocked) {
       document.body.addEventListener('touchmove', preventScroll, { passive: false });
@@ -834,7 +840,7 @@ const App = () => {
               </div>
 
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl z-40 border border-white/10 w-auto max-w-[calc(100%-1.5rem)] overflow-hidden">
-                <div className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
+                <div ref={toolbarRef} className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
                   <div className="flex gap-0.5 pr-2 border-r border-white/10 shrink-0">
                     <button onClick={() => setTool('hand')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='hand'?'bg-amber-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Hand size={18}/></button>
                     <button onClick={() => setTool('pen')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='pen'&&!isTransparentMode?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Edit3 size={18}/></button>
