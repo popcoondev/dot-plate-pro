@@ -836,6 +836,18 @@ const App = () => {
                   )}
                 </div>
 
+                {/* Floating Copy Button for non-gamepad mode */}
+                {tool === 'select' && selection && !useVirtualPad && (
+                  <div className="absolute bottom-28 left-6 z-50">
+                    <button 
+                      onPointerDown={handleCopy} 
+                      className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xl border-2 border-indigo-400 active:scale-90"
+                    >
+                      <Copy size={18}/>
+                    </button>
+                  </div>
+                )}
+
                 {pixels && !useVirtualPad && (
                   <button 
                     onClick={() => setIsCanvasLocked(!isCanvasLocked)} 
