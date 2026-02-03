@@ -39,7 +39,8 @@ import {
   Lock,
   Unlock,
   Paintbrush,
-  ScanLine
+  ScanLine,
+  Grid
 } from 'lucide-react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -113,6 +114,7 @@ const App = () => {
   const [pipZoom, setPipZoom] = useState(1.0); 
   const [isTransparentMode, setIsTransparentMode] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false); 
+  const [showGrid, setShowGrid] = useState(false);
 
   const [useVirtualPad, setUseVirtualPad] = useState(false);
   const [isCanvasLocked, setIsCanvasLocked] = useState(false);
@@ -638,10 +640,28 @@ const App = () => {
     ctx.fillStyle = '#f8f9fa'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     const checkSize = Math.max(2, 5 * zoom); ctx.fillStyle = '#f1f5f9';
     for (let y = 0; y < canvas.height; y += checkSize * 2) { for (let x = 0; x < canvas.width; x += checkSize * 2) { ctx.fillRect(x, y, checkSize, checkSize); ctx.fillRect(x + checkSize, y + checkSize, checkSize, checkSize); } }
+    
+    if (showGrid) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+      ctx.lineWidth = 0.5;
+      for (let x = 1; x < w; x++) {
+        ctx.beginPath();
+        ctx.moveTo(x * pSize, 0);
+        ctx.lineTo(x * pSize, h * pSize);
+        ctx.stroke();
+      }
+      for (let y = 1; y < h; y++) {
+        ctx.beginPath();
+        ctx.moveTo(0, y * pSize);
+        ctx.lineTo(w * pSize, y * pSize);
+        ctx.stroke();
+      }
+    }
+
     pixels.forEach((row, y) => { row.forEach((color, x) => { if (!Array.isArray(color) || JSON.stringify(color) === TRANSPARENT_KEY) return; ctx.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`; ctx.fillRect(x * pSize, y * pSize, pSize, pSize); }); });
     if (selection) { const x1 = Math.min(selection.start.x, selection.end.x) * pSize; const x2 = (Math.max(selection.start.x, selection.end.x) + 1) * pSize; const y1 = Math.min(selection.start.y, selection.end.y) * pSize; const y2 = (Math.max(selection.start.y, selection.end.y) + 1) * pSize; ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.fillStyle = 'rgba(79, 70, 229, 0.1)'; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]); }
     if (useVirtualPad) { ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2.5; ctx.strokeRect(cursorPos.x * pSize, cursorPos.y * pSize, pSize, pSize); }
-  }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, tool, clipboard]);
+  }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, tool, clipboard, showGrid]);
 
   useEffect(() => {
     if (activeTab === '3d' && pixels && threeRef.current) {
@@ -753,6 +773,7 @@ const App = () => {
                     <button onClick={() => setShowConfirmModal(true)} className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm active:scale-90 transition"><FilePlus size={14}/></button>
                     <label className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm cursor-pointer active:scale-90 transition"><ImagePlus size={14}/><input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && handleUpload(e.target.files[0])} /></label>
                     <button onClick={() => setShowOriginal(!showOriginal)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm ${showOriginal ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><ImageIcon size={14}/></button>
+                    <button onClick={() => setShowGrid(!showGrid)} className={`p-1.5 rounded-lg border transition shadow-sm ${showGrid ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><Grid size={14}/></button>
                   </div>
                 </div>
                 <div className="w-full px-1 flex items-center gap-2">
