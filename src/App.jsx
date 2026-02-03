@@ -98,7 +98,7 @@ const App = () => {
   // 物理パラメータ
   const [dotSize, setDotSize] = useState(1.0);        
   const [layerThickness, setLayerThickness] = useState(1.0); 
-  const [baseThickness, setBaseThickness] = useState(0.2); 
+  const [baseThickness, setBaseThickness] = useState(0.0); 
   const [padSensitivity, setPadSensitivity] = useState(1); 
   
   const [pixels, setPixels] = useState(null); 
@@ -123,10 +123,18 @@ const App = () => {
   const [clipboard, setClipboard] = useState(null);
 
   const [layerOrder, setLayerOrder] = useState([]); 
+  const [layerHeightAdjustments, setLayerHeightAdjustments] = useState({});
 
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false); 
   const [statusMessage, setStatusMessage] = useState("");
+  
+  const handleLayerHeightChange = (colorStr, delta) => {
+    setLayerHeightAdjustments(prev => ({
+      ...prev,
+      [colorStr]: ((prev[colorStr] || 0) + delta)
+    }));
+  };
 
   // --- 参照 ---
   const editorCanvasRef = useRef(null);
@@ -644,7 +652,19 @@ const App = () => {
       scene.add(light);
       const group = new THREE.Group();
       const h = pixels.length; const w = pixels[0].length;
-      const layerIndices = {}; layerOrder.forEach((c, i) => layerIndices[c] = i);
+      
+      const layerIndices = {};
+      layerOrder.forEach((c, i) => layerIndices[c] = i);
+      
+      const cumulativeHeights = [];
+      let currentHeight = 0;
+      layerOrder.forEach((colorStr) => {
+        const adjustment = layerHeightAdjustments[colorStr] || 0;
+        const effectiveThickness = layerThickness + adjustment;
+        currentHeight += effectiveThickness;
+        cumulativeHeights.push(currentHeight);
+      });
+
       if (baseThickness > 0) {
         const baseGeo = new THREE.BoxGeometry(w * dotSize, h * dotSize, baseThickness);
         const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshLambertMaterial({ color: 0xdddddd }));
@@ -653,8 +673,11 @@ const App = () => {
       pixels.forEach((row, y) => {
         row.forEach((color, x) => {
           if (!Array.isArray(color) || JSON.stringify(color) === TRANSPARENT_KEY) return;
-          const layerIdx = layerIndices[JSON.stringify(color)] ?? 0;
-          const stackHeight = (layerIdx + 1) * layerThickness;
+          const layerIdx = layerIndices[JSON.stringify(color)];
+          if (layerIdx === undefined) return;
+          
+          const stackHeight = cumulativeHeights[layerIdx];
+          
           const mesh = new THREE.Mesh(new THREE.BoxGeometry(dotSize, dotSize, stackHeight), new THREE.MeshLambertMaterial({ color: new THREE.Color(`rgb(${color[0]},${color[1]},${color[2]})`) }));
           mesh.position.set((x - (w - 1) / 2) * dotSize, ((h - 1) / 2 - y) * dotSize, baseThickness + stackHeight / 2);
           group.add(mesh);
@@ -668,7 +691,7 @@ const App = () => {
       const animate = () => { if (threeRef.current) { requestAnimationFrame(animate); renderer.render(scene, camera); } };
       animate();
     }
-  }, [activeTab, pixels, dotSize, layerThickness, baseThickness, layerOrder]);
+  }, [activeTab, pixels, dotSize, layerThickness, baseThickness, layerOrder, layerHeightAdjustments]);
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
@@ -843,38 +866,52 @@ const App = () => {
             <div className="h-full flex flex-col px-6 py-4">
               <h2 className="text-base font-black tracking-tight uppercase mb-4 flex items-center gap-2"><Layers className="text-indigo-600" size={18}/> Stack Order</h2>
               <div className="flex-1 overflow-auto space-y-2 pr-2 custom-scrollbar">
-                {layerOrder.length === 0 ? <p className="text-center text-[10px] text-slate-300 mt-10 font-black tracking-widest uppercase">No Data</p> : 
-                  layerOrder.map((colorStr, i) => {
-                    const color = JSON.parse(colorStr);
-                    return (
-                      <div key={colorStr} className={`flex items-center gap-4 p-3.5 bg-slate-50 border border-slate-100 rounded-xl transition-all ${'hover:bg-white hover:shadow-md hover:border-indigo-100'}`}>
-                        {/* 修正: 上下ボタンによる順序入れ替え */}
-                        <div className="flex flex-col gap-1 shrink-0">
-                          <button 
-                            onClick={() => moveLayer(i, -1)} 
-                            disabled={i === 0}
-                            className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"
-                          >
-                            <ChevronUp size={16} />
-                          </button>
-                          <button 
-                            onClick={() => moveLayer(i, 1)} 
-                            disabled={i === layerOrder.length - 1}
-                            className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"
-                          >
-                            <ChevronDown size={16} />
-                          </button>
+                {(() => {
+                  const cumulativeHeights = [];
+                  let currentHeight = 0;
+                  layerOrder.forEach((colorStr) => {
+                    const adjustment = layerHeightAdjustments[colorStr] || 0;
+                    const effectiveThickness = layerThickness + adjustment;
+                    currentHeight += effectiveThickness;
+                    cumulativeHeights.push(currentHeight);
+                  });
+
+                  return layerOrder.length === 0 ? <p className="text-center text-[10px] text-slate-300 mt-10 font-black tracking-widest uppercase">No Data</p> : 
+                    layerOrder.map((colorStr, i) => {
+                      const color = JSON.parse(colorStr);
+                      return (
+                        <div key={colorStr} className={`flex items-center gap-4 p-3.5 bg-slate-50 border border-slate-100 rounded-xl transition-all ${'hover:bg-white hover:shadow-md hover:border-indigo-100'}`}>
+                          <div className="flex flex-col gap-1 shrink-0">
+                            <button 
+                              onClick={() => moveLayer(i, -1)} 
+                              disabled={i === 0}
+                              className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"
+                            >
+                              <ChevronUp size={16} />
+                            </button>
+                            <button 
+                              onClick={() => moveLayer(i, 1)} 
+                              disabled={i === layerOrder.length - 1}
+                              className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"
+                            >
+                              <ChevronDown size={16} />
+                            </button>
+                          </div>
+                          
+                          <div className="w-10 h-10 rounded-lg shadow-inner border border-white shrink-0" style={{ backgroundColor: `rgb(${color[0]},${color[1]},${color[2]})` }} />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p>
+                            <p className="text-xs font-bold text-slate-700">Height: <span className="text-indigo-600">{(baseThickness + cumulativeHeights[i]).toFixed(1)}mm</span></p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(colorStr, -0.1); }} className="p-1.5 bg-white/80 rounded-lg border border-slate-200 shadow-sm active:scale-90 transition"><Minus size={12} /></button>
+                            <span className="text-xs font-bold text-slate-600 w-12 text-center">{(layerThickness + (layerHeightAdjustments[colorStr] || 0)).toFixed(1)} mm</span>
+                            <button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(colorStr, 0.1); }} className="p-1.5 bg-white/80 rounded-lg border border-slate-200 shadow-sm active:scale-90 transition"><Plus size={12} /></button>
+                          </div>
                         </div>
-                        
-                        <div className="w-10 h-10 rounded-lg shadow-inner border border-white shrink-0 pointer-events-none" style={{ backgroundColor: `rgb(${color[0]},${color[1]},${color[2]})` }} />
-                        <div className="flex-1 min-w-0 pointer-events-none">
-                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p>
-                          <p className="text-xs font-bold text-slate-700">Height: <span className="text-indigo-600">{(baseThickness+(i+1)*layerThickness).toFixed(1)}mm</span></p>
-                        </div>
-                      </div>
-                    )
-                  })
-                }
+                      )
+                    })
+                })()}
               </div>
             </div>
           )}
