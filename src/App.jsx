@@ -134,6 +134,9 @@ const App = () => {
   const [showSampleOffsetControls, setShowSampleOffsetControls] = useState(false);
   const [sampleOffsetX, setSampleOffsetX] = useState(0);
   const [sampleOffsetY, setSampleOffsetY] = useState(0);
+  const [isResolutionToolbarVisible, setIsResolutionToolbarVisible] = useState(true);
+  const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true);
+  const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
   
   const handleLayerHeightChange = (colorStr, delta) => {
     setLayerHeightAdjustments(prev => ({
@@ -818,31 +821,38 @@ const App = () => {
                     <button onClick={() => setShowOriginal(!showOriginal)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm ${showOriginal ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><ImageIcon size={14}/></button>
                     <button onClick={() => setShowGrid(!showGrid)} className={`p-1.5 rounded-lg border transition shadow-sm ${showGrid ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><Grid size={14}/></button>
                     <div className="w-px h-4 bg-slate-100 mx-1"></div>
-                    <button onClick={() => setShowSampleOffsetControls(!showSampleOffsetControls)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm disabled:opacity-30 disabled:cursor-not-allowed ${showSampleOffsetControls ? 'bg-indigo-100 border-indigo-200 text-indigo-600' : 'bg-white border-slate-100 text-slate-400'}`}><MoreVertical size={14}/></button>
+                    <button onClick={() => setShowSampleOffsetControls(!showSampleOffsetControls)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm disabled:opacity-30 disabled:cursor-not-allowed ${showSampleOffsetControls && isResolutionToolbarVisible ? 'bg-indigo-100 border-indigo-200 text-indigo-600' : 'bg-white border-slate-100 text-slate-400'}`}><MoreVertical size={14}/></button>
+                    <button onClick={() => setIsResolutionToolbarVisible(!isResolutionToolbarVisible)} className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm active:scale-90 transition">
+                      {isResolutionToolbarVisible ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+                    </button>
                   </div>
                 </div>
-                <div className="w-full px-1 flex items-center gap-2">
-                  <button onClick={() => setGridSize(prev => Math.max(MIN_RESOLUTION, prev - 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Minus size={14} /></button>
-                  <input type="range" min={MIN_RESOLUTION} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
-                  <button onClick={() => setGridSize(prev => Math.min(MAX_RESOLUTION, prev + 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Plus size={14} /></button>
-                </div>
-                {sourceImage && showSampleOffsetControls && (
-                  <div className="mt-3 pt-3 border-t border-slate-100 space-y-3 px-1">
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black text-slate-400 uppercase flex justify-between">
-                        <span>X-Axis Sampling Offset</span>
-                        <span className="font-mono text-indigo-500">{sampleOffsetX.toFixed(2)}</span>
-                      </label>
-                      <input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetX} onChange={(e) => setSampleOffsetX(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                {isResolutionToolbarVisible && (
+                  <>
+                    <div className="w-full px-1 flex items-center gap-2">
+                      <button onClick={() => setGridSize(prev => Math.max(MIN_RESOLUTION, prev - 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Minus size={14} /></button>
+                      <input type="range" min={MIN_RESOLUTION} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                      <button onClick={() => setGridSize(prev => Math.min(MAX_RESOLUTION, prev + 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Plus size={14} /></button>
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[9px] font-black text-slate-400 uppercase flex justify-between">
-                        <span>Y-Axis Sampling Offset</span>
-                        <span className="font-mono text-indigo-500">{sampleOffsetY.toFixed(2)}</span>
-                      </label>
-                      <input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetY} onChange={(e) => setSampleOffsetY(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
-                    </div>
-                  </div>
+                    {sourceImage && showSampleOffsetControls && (
+                      <div className="mt-3 pt-3 border-t border-slate-100 space-y-3 px-1">
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-black text-slate-400 uppercase flex justify-between">
+                            <span>X-Axis Sampling Offset</span>
+                            <span className="font-mono text-indigo-500">{sampleOffsetX.toFixed(2)}</span>
+                          </label>
+                          <input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetX} onChange={(e) => setSampleOffsetX(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-black text-slate-400 uppercase flex justify-between">
+                            <span>Y-Axis Sampling Offset</span>
+                            <span className="font-mono text-indigo-500">{sampleOffsetY.toFixed(2)}</span>
+                          </label>
+                          <input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetY} onChange={(e) => setSampleOffsetY(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -935,38 +945,52 @@ const App = () => {
                 )}
               </div>
 
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-40 w-auto max-w-[calc(100%-1.5rem)]">
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex flex-col md:flex-row items-center md:items-start gap-2 z-40 w-auto max-w-[calc(100%-1.5rem)]">
                 {/* Top Row: Size, Zoom, Color */}
-                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden w-full">
-                  <div className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
-                    <div className="flex items-center gap-1 px-1.5 py-1 bg-white/5 rounded-full border border-white/5 shrink-0">
-                      <button onClick={() => setBrushSize(s=>Math.max(1, s-1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Minus size={12}/></button>
-                      <span className="text-white text-[9px] font-black w-3 text-center">{brushSize}</span>
-                      <button onClick={() => setBrushSize(s=>Math.min(20, s+1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Plus size={12}/></button>
-                    </div>
-                    <div className="flex items-center gap-1 px-1.5 py-1 bg-white/5 rounded-full border border-white/5 shrink-0">
-                      <button onClick={() => setZoom(z => Math.max(0.1, z - 0.1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Minus size={12}/></button>
-                      <span className="text-white text-[9px] font-black min-w-[28px] text-center">{Math.round(zoom*100)}%</span>
-                      <button onClick={() => setZoom(z => Math.min(10, z + 0.1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Plus size={12}/></button>
-                    </div>
-                    <input type="color" value={`#${currentColor.map(c=>(c||0).toString(16).padStart(2,'0')).join('')}`} onChange={e => { const [r,g,b] = [1,3,5].map(i => parseInt(e.target.value.slice(i, i+2), 16)); setCurrentColor([r,g,b]); setIsTransparentMode(false); }} className="w-8 h-8 rounded-full border-2 border-white/20 p-0 shrink-0 overflow-hidden cursor-pointer active:scale-90 transition" />
+                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden">
+                  <div className="flex items-center">
+                    {isBrushToolbarVisible && (
+                      <div className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
+                        <div className="flex items-center gap-1 px-1.5 py-1 bg-white/5 rounded-full border border-white/5 shrink-0">
+                          <button onClick={() => setBrushSize(s=>Math.max(1, s-1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Minus size={12}/></button>
+                          <span className="text-white text-[9px] font-black w-3 text-center">{brushSize}</span>
+                          <button onClick={() => setBrushSize(s=>Math.min(20, s+1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Plus size={12}/></button>
+                        </div>
+                        <div className="flex items-center gap-1 px-1.5 py-1 bg-white/5 rounded-full border border-white/5 shrink-0">
+                          <button onClick={() => setZoom(z => Math.max(0.1, z - 0.1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Minus size={12}/></button>
+                          <span className="text-white text-[9px] font-black min-w-[28px] text-center">{Math.round(zoom*100)}%</span>
+                          <button onClick={() => setZoom(z => Math.min(10, z + 0.1))} className="text-slate-400 p-0.5 hover:text-white active:scale-90 transition"><Plus size={12}/></button>
+                        </div>
+                        <input type="color" value={`#${currentColor.map(c=>(c||0).toString(16).padStart(2,'0')).join('')}`} onChange={e => { const [r,g,b] = [1,3,5].map(i => parseInt(e.target.value.slice(i, i+2), 16)); setCurrentColor([r,g,b]); setIsTransparentMode(false); }} className="w-8 h-8 rounded-full border-2 border-white/20 p-0 shrink-0 overflow-hidden cursor-pointer active:scale-90 transition" />
+                      </div>
+                    )}
+                    <button onClick={() => setIsBrushToolbarVisible(!isBrushToolbarVisible)} className="p-2.5 text-slate-400 hover:text-white self-stretch border-l border-white/10">
+                      {isBrushToolbarVisible ? <ChevronDown size={16}/> : <ChevronUp size={16}/>}
+                    </button>
                   </div>
                 </div>
 
                 {/* Bottom Row: Tools */}
-                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden w-full">
-                  <div ref={toolbarRef} className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
-                    <div className="flex gap-0.5 pr-2 border-r border-white/10 shrink-0">
-                      <button onClick={() => setTool('hand')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='hand'?'bg-amber-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Hand size={18}/></button>
-                      <button onClick={() => setTool('pen')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='pen'&&!isTransparentMode?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Edit3 size={18}/></button>
-                      <button onClick={() => setTool('select')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='select'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Square size={18}/></button>
-                      <button onClick={() => setTool('paste')} disabled={!clipboard} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='paste'?'bg-emerald-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300 disabled:opacity-10'}`}><ClipboardPaste size={18}/></button>
-                      <button onClick={() => setTool('bucket')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bucket'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><PaintBucket size={18}/></button>
-                      <button onClick={() => setTool('islandFill')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='islandFill'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Paintbrush size={18}/></button>
-                      <button onClick={() => setTool('autoOutline')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='autoOutline'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><ScanLine size={18}/></button>
-                      <button onClick={() => setTool('dropper')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='dropper'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Pipette size={18}/></button>
-                      <button onClick={() => setIsTransparentMode(!isTransparentMode)} className={`p-2.5 rounded-full transition-all shrink-0 ${isTransparentMode?'bg-white text-black':'text-slate-500 hover:text-slate-300'}`}><Circle size={16} strokeDasharray="3 3"/></button>
-                    </div>
+                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden">
+                  <div className="flex items-center">
+                    {isToolSelectorVisible && (
+                      <div ref={toolbarRef} className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
+                        <div className="flex gap-0.5 pr-2 border-r border-white/10 shrink-0">
+                          <button onClick={() => setTool('hand')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='hand'?'bg-amber-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Hand size={18}/></button>
+                          <button onClick={() => setTool('pen')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='pen'&&!isTransparentMode?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Edit3 size={18}/></button>
+                          <button onClick={() => setTool('select')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='select'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Square size={18}/></button>
+                          <button onClick={() => setTool('paste')} disabled={!clipboard} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='paste'?'bg-emerald-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300 disabled:opacity-10'}`}><ClipboardPaste size={18}/></button>
+                          <button onClick={() => setTool('bucket')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bucket'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><PaintBucket size={18}/></button>
+                          <button onClick={() => setTool('islandFill')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='islandFill'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Paintbrush size={18}/></button>
+                          <button onClick={() => setTool('autoOutline')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='autoOutline'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><ScanLine size={18}/></button>
+                          <button onClick={() => setTool('dropper')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='dropper'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Pipette size={18}/></button>
+                          <button onClick={() => setIsTransparentMode(!isTransparentMode)} className={`p-2.5 rounded-full transition-all shrink-0 ${isTransparentMode?'bg-white text-black':'text-slate-500 hover:text-slate-300'}`}><Circle size={16} strokeDasharray="3 3"/></button>
+                        </div>
+                      </div>
+                    )}
+                    <button onClick={() => setIsToolSelectorVisible(!isToolSelectorVisible)} className="p-2.5 text-slate-400 hover:text-white self-stretch border-l border-white/10">
+                      {isToolSelectorVisible ? <ChevronDown size={16}/> : <ChevronUp size={16}/>}
+                    </button>
                   </div>
                 </div>
               </div>
