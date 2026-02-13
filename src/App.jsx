@@ -40,7 +40,8 @@ import {
   Unlock,
   Paintbrush,
   ScanLine,
-  Grid
+  Grid,
+  MoreVertical
 } from 'lucide-react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -104,8 +105,7 @@ const App = () => {
   
   const [pixels, setPixels] = useState(null); 
   const [sourceImage, setSourceImage] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [historyStep, setHistoryStep] = useState(-1);
+  const [history, setHistory] = useState({ stack: [], step: -1 });
   
   const [tool, setTool] = useState('hand'); 
   const [currentColor, setCurrentColor] = useState([255, 0, 0]);
@@ -130,6 +130,10 @@ const App = () => {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false); 
   const [statusMessage, setStatusMessage] = useState("");
+
+  const [showSampleOffsetControls, setShowSampleOffsetControls] = useState(false);
+  const [sampleOffsetX, setSampleOffsetX] = useState(0);
+  const [sampleOffsetY, setSampleOffsetY] = useState(0);
   
   const handleLayerHeightChange = (colorStr, delta) => {
     setLayerHeightAdjustments(prev => ({
@@ -225,28 +229,40 @@ const App = () => {
   const pushToHistory = useCallback((newPixels) => {
     if (!newPixels) return;
     const serialized = JSON.stringify(newPixels);
-    setHistory(prev => {
-      const newHistory = prev.slice(0, historyStep + 1);
-      newHistory.push(serialized);
-      if (newHistory.length > MAX_UNDO) newHistory.shift();
-      return newHistory;
+    setHistory(prevHistory => {
+        const newStack = prevHistory.stack.slice(0, prevHistory.step + 1);
+        newStack.push(serialized);
+        if (newStack.length > MAX_UNDO) {
+          newStack.shift();
+        }
+        const newStep = newStack.length - 1;
+        return { stack: newStack, step: newStep };
     });
-    setHistoryStep(prev => Math.min(prev + 1, MAX_UNDO - 1));
-  }, [historyStep]);
+  }, []);
 
   const undo = useCallback(() => {
-    if (historyStep > 0) {
-      const prevPixels = JSON.parse(history[historyStep - 1]);
-      setPixels(prevPixels); setHistoryStep(historyStep - 1); syncLayersFromPixels(prevPixels);
-    }
-  }, [history, historyStep, syncLayersFromPixels]);
+    setHistory(prevHistory => {
+      if (prevHistory.step > 0) {
+        const prevPixels = JSON.parse(prevHistory.stack[prevHistory.step - 1]);
+        setPixels(prevPixels);
+        syncLayersFromPixels(prevPixels);
+        return { ...prevHistory, step: prevHistory.step - 1 };
+      }
+      return prevHistory;
+    });
+  }, [syncLayersFromPixels]);
 
   const redo = useCallback(() => {
-    if (historyStep < history.length - 1) {
-      const nextPixels = JSON.parse(history[historyStep + 1]);
-      setPixels(nextPixels); setHistoryStep(historyStep + 1); syncLayersFromPixels(nextPixels);
-    }
-  }, [history, historyStep, syncLayersFromPixels]);
+    setHistory(prevHistory => {
+      if (prevHistory.step < prevHistory.stack.length - 1) {
+        const nextPixels = JSON.parse(prevHistory.stack[prevHistory.step + 1]);
+        setPixels(nextPixels);
+        syncLayersFromPixels(nextPixels);
+        return { ...prevHistory, step: prevHistory.step + 1 };
+      }
+      return prevHistory;
+    });
+  }, [syncLayersFromPixels]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -389,6 +405,50 @@ const App = () => {
     });
   }, [tool, currentColor, isTransparentMode, brushSize, clipboard]);
 
+  const reprocessImage = useCallback((imgSrc, size, offsetX, offsetY) => {
+    if (!imgSrc) return;
+    const img = new Image();
+    img.onload = () => {
+      const sourceCanvas = document.createElement('canvas');
+      sourceCanvas.width = img.width;
+      sourceCanvas.height = img.height;
+      const sourceCtx = sourceCanvas.getContext('2d');
+      sourceCtx.drawImage(img, 0, 0);
+
+      const aspect = img.height / img.width;
+      const h = Math.round(size * aspect);
+      
+      const newPixels = [];
+      for (let y = 0; y < h; y++) {
+        const row = [];
+        for (let x = 0; x < size; x++) {
+          const sourceX = ((x + 0.5 + offsetX) / size) * img.width;
+          const sourceY = ((y + 0.5 + offsetY) / h) * img.height;
+          
+          const clampedX = Math.max(0, Math.min(img.width - 1, Math.floor(sourceX)));
+          const clampedY = Math.max(0, Math.min(img.height - 1, Math.floor(sourceY)));
+
+          const pixelData = sourceCtx.getImageData(clampedX, clampedY, 1, 1).data;
+
+          if (pixelData[3] < 128) {
+            row.push([...TRANSPARENT_COLOR]);
+          } else {
+            row.push([pixelData[0], pixelData[1], pixelData[2]]);
+          }
+        }
+        newPixels.push(row);
+      }
+
+      setPixels(newPixels);
+      pushToHistory(newPixels);
+      syncLayersFromPixels(newPixels);
+      const initialPos = { x: Math.floor(size / 2), y: Math.floor(h / 2) };
+      setCursorPos(initialPos);
+      cursorSubPixelRef.current = { ...initialPos };
+    };
+    img.src = imgSrc;
+  }, [syncLayersFromPixels, pushToHistory]);
+
   const handleUpload = useCallback((file) => {
     if (!file) return;
     const reader = new FileReader();
@@ -396,39 +456,11 @@ const App = () => {
       const fileName = file.name.split('.').slice(0, -1).join('.');
       setProjectName(fileName); setOutputFileName(fileName);
       setSourceImage(e.target.result); setOriginalFilePath(file.name); 
-      setCreatedAt(getFormattedDate("display")); setHistory([]); setHistoryStep(-1);
-      reprocessImage(e.target.result, gridSize);
+      setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
+      reprocessImage(e.target.result, gridSize, sampleOffsetX, sampleOffsetY);
     };
     reader.readAsDataURL(file);
-  }, [gridSize]);
-
-  const reprocessImage = useCallback((imgSrc, size) => {
-    const img = new Image();
-    img.onload = () => {
-      const tempCanvas = document.createElement('canvas');
-      const ctx = tempCanvas.getContext('2d');
-      const aspect = img.height / img.width;
-      const h = Math.round(size * aspect);
-      tempCanvas.width = size; tempCanvas.height = h;
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(img, 0, 0, size, h);
-      const imageData = ctx.getImageData(0, 0, size, h);
-      const newPixels = [];
-      for (let y = 0; y < h; y++) {
-        const row = [];
-        for (let x = 0; x < size; x++) {
-          const idx = (y * size + x) * 4;
-          if (imageData.data[idx+3] < 128) row.push([...TRANSPARENT_COLOR]);
-          else row.push([imageData.data[idx], imageData.data[idx+1], imageData.data[idx+2]]);
-        }
-        newPixels.push(row);
-      }
-      setPixels(newPixels); pushToHistory(newPixels); syncLayersFromPixels(newPixels);
-      const initialPos = { x: Math.floor(size / 2), y: Math.floor(h / 2) };
-      setCursorPos(initialPos); cursorSubPixelRef.current = { ...initialPos };
-    };
-    img.src = imgSrc;
-  }, [syncLayersFromPixels, pushToHistory]);
+  }, [gridSize, sampleOffsetX, sampleOffsetY, reprocessImage]);
 
   const handleNewCanvas = useCallback(() => {
     const size = gridSize;
@@ -436,7 +468,7 @@ const App = () => {
     const defaultName = getFormattedDate("compact");
     setProjectName(defaultName); setOutputFileName(defaultName);
     setSourceImage(null); setShowOriginal(false); setOriginalFilePath("");
-    setCreatedAt(getFormattedDate("display")); setHistory([]); setHistoryStep(-1);
+    setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
     setPixels(newPixels); pushToHistory(newPixels); syncLayersFromPixels(newPixels);
     setTool('pen'); setShowConfirmModal(false);
     const initialPos = { x: Math.floor(size / 2), y: Math.floor(size / 2) };
@@ -473,7 +505,7 @@ const App = () => {
           setLayerThickness(data.layerThickness); setBaseThickness(data.baseThickness);
           setPadSensitivity(data.padSensitivity); setLayerOrder(data.layerOrder || []);
           setSourceImage(data.sourceImage || null); setPixels(data.pixels);
-          setHistory([JSON.stringify(data.pixels)]); setHistoryStep(0);
+          setHistory({ stack: [JSON.stringify(data.pixels)], step: 0 });
           setStatusMessage("プロジェクトを復元しました！📂");
           setTimeout(() => { isLoadingRef.current = false; centerCanvas(); }, 100);
         }
@@ -621,16 +653,27 @@ const App = () => {
 
   useEffect(() => {
     if (isLoadingRef.current) return;
-    if (sourceImage) reprocessImage(sourceImage, gridSize); 
-    else if (pixels) {
-      setPixels(prev => {
-        const oldH = prev.length; const oldW = prev[0]?.length || 0;
-        return Array.from({ length: gridSize }, (_, y) =>
-          Array.from({ length: gridSize }, (_, x) => (y < oldH && x < oldW) ? prev[y][x] : [...TRANSPARENT_COLOR])
-        );
-      });
+    if (sourceImage) {
+      reprocessImage(sourceImage, gridSize, sampleOffsetX, sampleOffsetY);
+    } else if (pixels) {
+      const oldH = pixels.length;
+      const oldW = pixels[0]?.length || 0;
+      const newGridSize = parseInt(gridSize, 10);
+      
+      if (oldH === newGridSize && oldW === newGridSize) return;
+
+      const newPixels = Array.from({ length: newGridSize }, (_, y) =>
+        Array.from({ length: newGridSize }, (_, x) => {
+          if (y < oldH && x < oldW) {
+            return pixels[y][x];
+          }
+          return [...TRANSPARENT_COLOR];
+        })
+      );
+      setPixels(newPixels);
+      // Do not push to history for simple canvas resize
     }
-  }, [gridSize]); 
+  }, [gridSize, sampleOffsetX, sampleOffsetY, sourceImage, reprocessImage]);
 
   useEffect(() => {
     const canvas = editorCanvasRef.current; if (!canvas || !pixels) return;
@@ -724,8 +767,8 @@ const App = () => {
       <header className="flex items-center justify-between px-6 py-2.5 bg-white/80 backdrop-blur-md border-b border-slate-100 z-30 shrink-0">
         <h1 className="text-base font-black text-indigo-600 flex items-center gap-1 italic uppercase tracking-tight"><Zap fill="currentColor" size={18} /> Dot Plate Pro</h1>
         <div className="flex gap-1.5">
-          <button onClick={undo} disabled={historyStep <= 0} className="p-1.5 bg-slate-100/50 text-slate-600 rounded-lg disabled:opacity-20 active:scale-90 transition hover:bg-slate-100"><Undo size={16}/></button>
-          <button onClick={redo} disabled={historyStep >= history.length - 1} className="p-1.5 bg-slate-100/50 text-slate-600 rounded-lg disabled:opacity-20 active:scale-90 transition hover:bg-slate-100"><Redo size={16}/></button>
+          <button onClick={undo} disabled={history.step <= 0} className="p-1.5 bg-slate-100/50 text-slate-600 rounded-lg disabled:opacity-20 active:scale-90 transition hover:bg-slate-100"><Undo size={16}/></button>
+          <button onClick={redo} disabled={history.step >= history.stack.length - 1} className="p-1.5 bg-slate-100/50 text-slate-600 rounded-lg disabled:opacity-20 active:scale-90 transition hover:bg-slate-100"><Redo size={16}/></button>
         </div>
       </header>
 
@@ -774,6 +817,8 @@ const App = () => {
                     <label className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm cursor-pointer active:scale-90 transition"><ImagePlus size={14}/><input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && handleUpload(e.target.files[0])} /></label>
                     <button onClick={() => setShowOriginal(!showOriginal)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm ${showOriginal ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><ImageIcon size={14}/></button>
                     <button onClick={() => setShowGrid(!showGrid)} className={`p-1.5 rounded-lg border transition shadow-sm ${showGrid ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><Grid size={14}/></button>
+                    <div className="w-px h-4 bg-slate-100 mx-1"></div>
+                    <button onClick={() => setShowSampleOffsetControls(!showSampleOffsetControls)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm disabled:opacity-30 disabled:cursor-not-allowed ${showSampleOffsetControls ? 'bg-indigo-100 border-indigo-200 text-indigo-600' : 'bg-white border-slate-100 text-slate-400'}`}><MoreVertical size={14}/></button>
                   </div>
                 </div>
                 <div className="w-full px-1 flex items-center gap-2">
@@ -781,6 +826,24 @@ const App = () => {
                   <input type="range" min={MIN_RESOLUTION} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
                   <button onClick={() => setGridSize(prev => Math.min(MAX_RESOLUTION, prev + 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Plus size={14} /></button>
                 </div>
+                {sourceImage && showSampleOffsetControls && (
+                  <div className="mt-3 pt-3 border-t border-slate-100 space-y-3 px-1">
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-black text-slate-400 uppercase flex justify-between">
+                        <span>X-Axis Sampling Offset</span>
+                        <span className="font-mono text-indigo-500">{sampleOffsetX.toFixed(2)}</span>
+                      </label>
+                      <input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetX} onChange={(e) => setSampleOffsetX(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-black text-slate-400 uppercase flex justify-between">
+                        <span>Y-Axis Sampling Offset</span>
+                        <span className="font-mono text-indigo-500">{sampleOffsetY.toFixed(2)}</span>
+                      </label>
+                      <input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetY} onChange={(e) => setSampleOffsetY(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className={`flex-1 flex ${showOriginal ? 'flex-col lg:flex-row' : 'flex-col'} overflow-hidden relative`}>
