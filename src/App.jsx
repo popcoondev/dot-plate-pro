@@ -945,9 +945,9 @@ const App = () => {
                 )}
               </div>
 
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex flex-col md:flex-row items-center md:items-start gap-2 z-40 w-auto max-w-[calc(100%-1.5rem)]">
+              <div className="absolute bottom-4 left-4 right-4 flex flex-row items-center gap-2 z-40 overflow-x-auto no-scrollbar py-2">
                 {/* Top Row: Size, Zoom, Color */}
-                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden">
+                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden flex-shrink-0">
                   <div className="flex items-center">
                     {isBrushToolbarVisible && (
                       <div className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
@@ -971,7 +971,7 @@ const App = () => {
                 </div>
 
                 {/* Bottom Row: Tools */}
-                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden">
+                <div className="flex items-center bg-slate-900/95 backdrop-blur-md rounded-[2rem] shadow-2xl border border-white/10 overflow-hidden flex-shrink-0">
                   <div className="flex items-center">
                     {isToolSelectorVisible && (
                       <div ref={toolbarRef} className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
