@@ -545,7 +545,8 @@ const App = () => {
       let cz = baseThickness;
       layerOrder.forEach((cs, li) => {
         const col = JSON.parse(cs); const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1 };
-        const thick = layerThickness + (layerHeightAdjustments[cs] || 0); if (thick <= 0) return;
+        const thick = layerThickness + (layerHeightAdjustments[cs] || 0); 
+        if (Math.abs(thick) < 0.0001) return;
         const targetKeys = new Set(layerOrder.slice(li)); let contours = getUnionContours(pixels, targetKeys);
         const paths = contours.map(c => {
           const area = calculateArea(c); const isHole = area < 0; // グリッド空間
