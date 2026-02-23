@@ -115,6 +115,48 @@ const smoothPath = (points, toleranceMm, dotSize) => {
   return simplified;
 };
 
+// 2Dポリゴンオフセット (簡易版)
+const offsetPolygon = (points, offsetMm, dotSize) => {
+  const offset = offsetMm / dotSize;
+  if (Math.abs(offset) < 0.0001 || points.length < 3) return points;
+  
+  const result = [];
+  const len = points.length;
+  for (let i = 0; i < len; i++) {
+    const prev = points[(i + len - 1) % len];
+    const curr = points[i];
+    const next = points[(i + 1) % len];
+
+    const v1 = { x: curr.x - prev.x, y: curr.y - prev.y };
+    const v2 = { x: next.x - curr.x, y: next.y - curr.y };
+
+    const l1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y);
+    const l2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y);
+    if (l1 < 1e-6 || l2 < 1e-6) { result.push(curr); continue; }
+
+    const n1 = { x: v1.x / l1, y: v1.y / l1 };
+    const n2 = { x: v2.x / l2, y: v2.y / l2 };
+
+    // 法線 (CWで外向きになるように反転が必要な場合があるが、まずは標準)
+    // グリッド空間 (y-down) で CW なら (-dy, dx) は内向き
+    const norm1 = { x: n1.y, y: -n1.x };
+    const norm2 = { x: n2.y, y: -n2.x };
+
+    const bisector = { x: norm1.x + norm2.x, y: norm1.y + norm2.y };
+    const bl = Math.sqrt(bisector.x * bisector.x + bisector.y * bisector.y);
+    
+    if (bl < 1e-6) {
+       result.push({ x: curr.x + norm1.x * offset, y: curr.y + norm1.y * offset });
+    } else {
+       const nb = { x: bisector.x / bl, y: bisector.y / bl };
+       const cosHalfAngle = norm1.x * nb.x + norm1.y * nb.y;
+       const d = offset / Math.max(0.1, cosHalfAngle);
+       result.push({ x: curr.x + nb.x * d, y: curr.y + nb.y * d });
+    }
+  }
+  return result;
+};
+
 // 指定した色の集合（和集合）の輪郭を抽出
 const getUnionContours = (pixels, targetColorKeys) => {
   const h = pixels.length; const w = pixels[0].length;
@@ -221,7 +263,7 @@ const App = () => {
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
   
   const handleLayerHeightChange = (colorStr, delta) => setLayerHeightAdjustments(prev => ({ ...prev, [colorStr]: ((prev[colorStr] || 0) + delta) }));
-  const handleSmoothingChange = (colorStr, key, value) => setLayerSmoothingSettings(prev => ({ ...prev, [colorStr]: { ...(prev[colorStr] || { smoothOuter: false, smoothInner: false, tolerance: 0.1 }), [key]: value } }));
+  const handleSmoothingChange = (colorStr, key, value) => setLayerSmoothingSettings(prev => ({ ...prev, [colorStr]: { ...(prev[colorStr] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 }), [key]: value } }));
 
   const editorCanvasRef = useRef(null); const scrollContainerRef = useRef(null); const canvasWrapperRef = useRef(null);
   const threeRef = useRef(null); const sceneRef = useRef(null); const isDrawingRef = useRef(false);
@@ -544,14 +586,20 @@ const App = () => {
       }
       let cz = baseThickness;
       layerOrder.forEach((cs, li) => {
-        const col = JSON.parse(cs); const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1 };
+        const col = JSON.parse(cs); const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 };
         const thick = layerThickness + (layerHeightAdjustments[cs] || 0); 
         if (Math.abs(thick) < 0.0001) return;
         const targetKeys = new Set(layerOrder.slice(li)); let contours = getUnionContours(pixels, targetKeys);
         const paths = contours.map(c => {
           const area = calculateArea(c); const isHole = area < 0; // グリッド空間
           const enabled = isHole ? sm.smoothInner : sm.smoothOuter;
-          const processed = enabled ? smoothPath(c, sm.tolerance, dotSize) : c;
+          let processed = enabled ? smoothPath(c, sm.tolerance, dotSize) : c;
+          
+          // 外周のみオフセット (area > 0 in grid-space with y-down is CCW, wait check calcArea)
+          if (!isHole && Math.abs(sm.offset) > 0.0001) {
+            processed = offsetPolygon(processed, sm.offset, dotSize);
+          }
+          
           const pts = processed.map(p => new THREE.Vector2((p.x - w/2) * dotSize, (h/2 - p.y) * dotSize));
           return { pts, area };
         });
@@ -735,6 +783,7 @@ const App = () => {
                               <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={sm.smoothInner} onChange={(e) => handleSmoothingChange(cs, 'smoothInner', e.target.checked)} className="w-3.5 h-3.5 accent-indigo-600" /><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Smooth Inner</span></label>
                             </div>
                             <div className="space-y-1"><div className="flex justify-between items-center"><span className="text-[9px] font-black text-slate-400 uppercase">Tolerance</span><span className="text-[9px] font-mono text-indigo-600 font-bold">{sm.tolerance.toFixed(2)} mm</span></div><input type="range" min="0.1" max="2.0" step="0.1" value={sm.tolerance} onChange={(e) => handleSmoothingChange(cs, 'tolerance', parseFloat(e.target.value))} className="w-full h-1 appearance-none bg-slate-200 rounded-full accent-indigo-600" /></div>
+                            <div className="space-y-1"><div className="flex justify-between items-center"><span className="text-[9px] font-black text-slate-400 uppercase">Offset</span><span className="text-[9px] font-mono text-indigo-600 font-bold">{(sm.offset || 0).toFixed(2)} mm</span></div><input type="range" min="-5.0" max="5.0" step="0.1" value={sm.offset || 0} onChange={(e) => handleSmoothingChange(cs, 'offset', parseFloat(e.target.value))} className="w-full h-1 appearance-none bg-slate-200 rounded-full accent-indigo-600" /></div>
                           </div>
                         </div>
                       );
