@@ -262,7 +262,11 @@ const App = () => {
   const [isResolutionToolbarVisible, setIsResolutionToolbarVisible] = useState(true);
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
   
-  const handleLayerHeightChange = (colorStr, delta) => setLayerHeightAdjustments(prev => ({ ...prev, [colorStr]: ((prev[colorStr] || 0) + delta) }));
+  const handleLayerHeightChange = (colorStr, key, delta) => setLayerHeightAdjustments(prev => {
+    const current = prev[colorStr] || { plus: 0, minus: 0 };
+    const normalized = typeof current === 'number' ? { plus: current, minus: 0 } : current;
+    return { ...prev, [colorStr]: { ...normalized, [key]: Math.max(key === 'plus' ? -layerThickness : 0, normalized[key] + delta) } };
+  });
   const handleSmoothingChange = (colorStr, key, value) => setLayerSmoothingSettings(prev => ({ ...prev, [colorStr]: { ...(prev[colorStr] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 }), [key]: value } }));
 
   const editorCanvasRef = useRef(null); const scrollContainerRef = useRef(null); const canvasWrapperRef = useRef(null);
@@ -441,11 +445,11 @@ const App = () => {
 
   const saveProject = useCallback(() => {
     if (!pixels) return;
-    const pd = { version: "1.4", projectName, outputFileName, author, createdAt, originalFilePath, gridSize, dotSize, layerThickness, baseThickness, padSensitivity, layerOrder, pixels, sourceImage };
+    const pd = { version: "1.4", projectName, outputFileName, author, createdAt, originalFilePath, gridSize, dotSize, layerThickness, baseThickness, padSensitivity, layerOrder, layerHeightAdjustments, layerSmoothingSettings, pixels, sourceImage };
     const b = new Blob([JSON.stringify(pd)], { type: 'application/json' }); const u = URL.createObjectURL(b);
     const l = document.createElement('a'); l.href = u; l.download = `${projectName || 'project'}.json`;
     l.click(); setStatusMessage("プロジェクトを保存しました！💾");
-  }, [pixels, projectName, outputFileName, author, createdAt, originalFilePath, gridSize, dotSize, layerThickness, baseThickness, padSensitivity, layerOrder, sourceImage]);
+  }, [pixels, projectName, outputFileName, author, createdAt, originalFilePath, gridSize, dotSize, layerThickness, baseThickness, padSensitivity, layerOrder, layerHeightAdjustments, layerSmoothingSettings, sourceImage]);
 
   const loadProject = useCallback((e) => {
     const f = e.target.files[0]; if (!f) return; const r = new FileReader();
@@ -457,6 +461,7 @@ const App = () => {
           setAuthor(d.author || ""); setCreatedAt(d.createdAt || ""); setOriginalFilePath(d.originalFilePath || "");
           setGridSize(d.gridSize); setDotSize(d.dotSize); setLayerThickness(d.layerThickness); setBaseThickness(d.baseThickness);
           setPadSensitivity(d.padSensitivity); setLayerOrder(d.layerOrder || []); setSourceImage(d.sourceImage || null); setPixels(d.pixels);
+          setLayerHeightAdjustments(d.layerHeightAdjustments || {}); setLayerSmoothingSettings(d.layerSmoothingSettings || {});
           setHistory({ stack: [JSON.stringify(d.pixels)], step: 0 }); setStatusMessage("プロジェクトを復元しました！📂");
           setTimeout(() => { isLoadingRef.current = false; centerCanvas(); }, 100);
         }
@@ -587,39 +592,43 @@ const App = () => {
       let cz = baseThickness;
       layerOrder.forEach((cs, li) => {
         const col = JSON.parse(cs); const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 };
-        const thick = layerThickness + (layerHeightAdjustments[cs] || 0); 
-        if (Math.abs(thick) < 0.0001) return;
-        const targetKeys = new Set(layerOrder.slice(li)); let contours = getUnionContours(pixels, targetKeys);
-        const paths = contours.map(c => {
-          const area = calculateArea(c); const isHole = area < 0; // グリッド空間
-          const enabled = isHole ? sm.smoothInner : sm.smoothOuter;
-          let processed = enabled ? smoothPath(c, sm.tolerance, dotSize) : c;
-          
-          // 外周のみオフセット (area > 0 in grid-space with y-down is CCW, wait check calcArea)
-          if (!isHole && Math.abs(sm.offset) > 0.0001) {
-            processed = offsetPolygon(processed, sm.offset, dotSize);
-          }
-          
-          const pts = processed.map(p => new THREE.Vector2((p.x - w/2) * dotSize, (h/2 - p.y) * dotSize));
-          return { pts, area };
-        });
-        paths.sort((a, b) => Math.abs(b.area) - Math.abs(a.area));
-        const shapeGrp = [];
-        paths.forEach(({pts, area}) => {
-          if (area > 0) shapeGrp.push({ outer: [...pts].reverse(), holes: [] });
-          else {
-            const hpts = [...pts].reverse(); let parent = null;
-            for (let i = shapeGrp.length - 1; i >= 0; i--) { if (isPointInPolygon(hpts[0], shapeGrp[i].outer)) { parent = shapeGrp[i]; break; } }
-            if (parent) parent.holes.push(hpts); else shapeGrp.push({ outer: hpts, holes: [] });
-          }
-        });
-        shapeGrp.forEach(sg => {
-          const shape = new THREE.Shape(sg.outer); sg.holes.forEach(hp => shape.holes.push(new THREE.Path(hp)));
-          const geom = new THREE.ExtrudeGeometry(shape, { depth: thick, bevelEnabled: false });
-          const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(`rgb(${col[0]},${col[1]},${col[2]})`), side: THREE.DoubleSide });
-          const mesh = new THREE.Mesh(geom, mat); mesh.position.z = cz; group.add(mesh);
-        });
-        cz += thick;
+        const adj = layerHeightAdjustments[cs] || { plus: 0, minus: 0 };
+        const zPlus = typeof adj === 'number' ? adj : (adj.plus || 0);
+        const zMinus = typeof adj === 'number' ? 0 : (adj.minus || 0);
+        const thick = layerThickness + zPlus + zMinus; 
+        
+        if (thick > 0.0001) {
+          const targetKeys = new Set(layerOrder.slice(li)); let contours = getUnionContours(pixels, targetKeys);
+          const paths = contours.map(c => {
+            const area = calculateArea(c); const isHole = area < 0; 
+            const enabled = isHole ? sm.smoothInner : sm.smoothOuter;
+            let processed = enabled ? smoothPath(c, sm.tolerance, dotSize) : c;
+            
+            if (!isHole && Math.abs(sm.offset) > 0.0001) {
+              processed = offsetPolygon(processed, sm.offset, dotSize);
+            }
+            
+            const pts = processed.map(p => new THREE.Vector2((p.x - w/2) * dotSize, (h/2 - p.y) * dotSize));
+            return { pts, area };
+          });
+          paths.sort((a, b) => Math.abs(b.area) - Math.abs(a.area));
+          const shapeGrp = [];
+          paths.forEach(({pts, area}) => {
+            if (area > 0) shapeGrp.push({ outer: [...pts].reverse(), holes: [] });
+            else {
+              const hpts = [...pts].reverse(); let parent = null;
+              for (let i = shapeGrp.length - 1; i >= 0; i--) { if (isPointInPolygon(hpts[0], shapeGrp[i].outer)) { parent = shapeGrp[i]; break; } }
+              if (parent) parent.holes.push(hpts); else shapeGrp.push({ outer: hpts, holes: [] });
+            }
+          });
+          shapeGrp.forEach(sg => {
+            const shape = new THREE.Shape(sg.outer); sg.holes.forEach(hp => shape.holes.push(new THREE.Path(hp)));
+            const geom = new THREE.ExtrudeGeometry(shape, { depth: thick, bevelEnabled: false });
+            const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(`rgb(${col[0]},${col[1]},${col[2]})`), side: THREE.DoubleSide });
+            const mesh = new THREE.Mesh(geom, mat); mesh.position.z = cz - zMinus; group.add(mesh);
+          });
+        }
+        cz += (layerThickness + zPlus);
       });
       scene.add(group); sceneRef.current = group; const box = new THREE.Box3().setFromObject(group); const center = box.getCenter(new THREE.Vector3());
       camera.position.set(center.x, center.y - 100, center.z + 100); controls.target.copy(center); controls.update();
@@ -765,25 +774,52 @@ const App = () => {
               <h2 className="text-base font-black tracking-tight uppercase mb-4 flex items-center gap-2"><Layers className="text-indigo-600" size={18}/> Stack Order</h2>
               <div className="flex-1 overflow-auto space-y-2 pr-2 custom-scrollbar">
                 {(() => {
-                  const chs = []; let ch = 0; layerOrder.forEach((cs) => { ch += (layerThickness + (layerHeightAdjustments[cs] || 0)); chs.push(ch); });
+                  const chs = []; let ch = 0; layerOrder.forEach((cs) => { 
+                    const adj = layerHeightAdjustments[cs] || { plus: 0, minus: 0 };
+                    const zPlus = typeof adj === 'number' ? adj : (adj.plus || 0);
+                    ch += (layerThickness + zPlus); 
+                    chs.push(ch); 
+                  });
                   return layerOrder.length === 0 ? <p className="text-center text-[10px] text-slate-300 mt-10 font-black tracking-widest uppercase">No Data</p> : 
                     layerOrder.map((cs, i) => {
-                      const col = JSON.parse(cs); const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1 };
+                      const col = JSON.parse(cs); 
+                      const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 };
+                      const adj = layerHeightAdjustments[cs] || { plus: 0, minus: 0 };
+                      const zPlus = typeof adj === 'number' ? adj : (adj.plus || 0);
+                      const zMinus = typeof adj === 'number' ? 0 : (adj.minus || 0);
+                      
                       return (
-                        <div key={cs} className="flex flex-col gap-3 p-3.5 bg-slate-50 border border-slate-100 rounded-xl hover:bg-white hover:shadow-md transition-all">
-                          <div className="flex items-center gap-4">
-                            <div className="flex flex-col gap-1 shrink-0"><button onClick={() => moveLayer(i, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronUp size={16} /></button><button onClick={() => moveLayer(i, 1)} disabled={i === layerOrder.length - 1} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronDown size={16} /></button></div>
-                            <div className="w-10 h-10 rounded-lg shadow-inner border border-white shrink-0" style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }} />
-                            <div className="flex-1 min-w-0"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p><p className="text-xs font-bold text-slate-700">Height: <span className="text-indigo-600">{(baseThickness + chs[i]).toFixed(1)}mm</span></p></div>
-                            <div className="flex items-center gap-2"><button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(cs, -0.1); }} className="p-1.5 bg-white/80 rounded-lg border border-slate-200 shadow-sm active:scale-90 transition"><Minus size={12} /></button><span className="text-xs font-bold text-slate-600 w-12 text-center">{(layerThickness + (layerHeightAdjustments[cs] || 0)).toFixed(1)} mm</span><button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(cs, 0.1); }} className="p-1.5 bg-white/80 rounded-lg border border-slate-200 shadow-sm active:scale-90 transition"><Plus size={12} /></button></div>
-                          </div>
-                          <div className="pt-3 border-t border-slate-100 flex flex-col gap-3">
-                            <div className="flex items-center justify-between">
-                              <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={sm.smoothOuter} onChange={(e) => handleSmoothingChange(cs, 'smoothOuter', e.target.checked)} className="w-3.5 h-3.5 accent-indigo-600" /><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Smooth Outer</span></label>
-                              <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={sm.smoothInner} onChange={(e) => handleSmoothingChange(cs, 'smoothInner', e.target.checked)} className="w-3.5 h-3.5 accent-indigo-600" /><span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Smooth Inner</span></label>
+                        <div key={cs} className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-white hover:shadow-md transition-all">
+                          <div className="flex items-center gap-3">
+                            <div className="flex flex-col gap-0.5 shrink-0"><button onClick={() => moveLayer(i, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronUp size={12} /></button><button onClick={() => moveLayer(i, 1)} disabled={i === layerOrder.length - 1} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronDown size={12} /></button></div>
+                            <div className="w-8 h-8 rounded-lg shadow-inner border border-white shrink-0" style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }} />
+                            <div className="flex-1 min-w-0"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p><p className="text-[10px] font-bold text-slate-700">Top: <span className="text-indigo-600">{(baseThickness + chs[i]).toFixed(1)}mm</span></p></div>
+                            <div className="flex flex-col gap-1 shrink-0">
+                                <div className="flex items-center gap-1 justify-end">
+                                    <span className="text-[7px] font-black text-slate-400 uppercase w-4">Z+</span>
+                                    <button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(cs, 'plus', -0.1); }} className="p-1 bg-white/80 rounded-md border border-slate-200 shadow-sm active:scale-90 transition"><Minus size={10} /></button>
+                                    <span className="text-[10px] font-mono font-bold text-slate-600 w-8 text-center">{(layerThickness + zPlus).toFixed(1)}</span>
+                                    <button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(cs, 'plus', 0.1); }} className="p-1 bg-white/80 rounded-md border border-slate-200 shadow-sm active:scale-90 transition"><Plus size={10} /></button>
+                                </div>
+                                <div className="flex items-center gap-1 justify-end">
+                                    <span className="text-[7px] font-black text-slate-400 uppercase w-4">Z-</span>
+                                    <button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(cs, 'minus', -0.1); }} className="p-1 bg-white/80 rounded-md border border-slate-200 shadow-sm active:scale-90 transition"><Minus size={10} /></button>
+                                    <span className="text-[10px] font-mono font-bold text-slate-600 w-8 text-center">{zMinus.toFixed(1)}</span>
+                                    <button onClick={(e) => { e.stopPropagation(); handleLayerHeightChange(cs, 'minus', 0.1); }} className="p-1 bg-white/80 rounded-md border border-slate-200 shadow-sm active:scale-90 transition"><Plus size={10} /></button>
+                                </div>
                             </div>
-                            <div className="space-y-1"><div className="flex justify-between items-center"><span className="text-[9px] font-black text-slate-400 uppercase">Tolerance</span><span className="text-[9px] font-mono text-indigo-600 font-bold">{sm.tolerance.toFixed(2)} mm</span></div><input type="range" min="0.1" max="2.0" step="0.1" value={sm.tolerance} onChange={(e) => handleSmoothingChange(cs, 'tolerance', parseFloat(e.target.value))} className="w-full h-1 appearance-none bg-slate-200 rounded-full accent-indigo-600" /></div>
-                            <div className="space-y-1"><div className="flex justify-between items-center"><span className="text-[9px] font-black text-slate-400 uppercase">Offset</span><span className="text-[9px] font-mono text-indigo-600 font-bold">{(sm.offset || 0).toFixed(2)} mm</span></div><input type="range" min="-5.0" max="5.0" step="0.1" value={sm.offset || 0} onChange={(e) => handleSmoothingChange(cs, 'offset', parseFloat(e.target.value))} className="w-full h-1 appearance-none bg-slate-200 rounded-full accent-indigo-600" /></div>
+                          </div>
+                          <div className="pt-2 border-t border-slate-100 grid grid-cols-2 gap-x-3 gap-y-1.5">
+                            <label className="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" checked={sm.smoothOuter} onChange={(e) => handleSmoothingChange(cs, 'smoothOuter', e.target.checked)} className="w-3 h-3 accent-indigo-600" /><span className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Outer</span></label>
+                            <label className="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" checked={sm.smoothInner} onChange={(e) => handleSmoothingChange(cs, 'smoothInner', e.target.checked)} className="w-3 h-3 accent-indigo-600" /><span className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Inner</span></label>
+                            <div className="flex flex-col gap-0.5">
+                                <div className="flex justify-between items-center text-[7px] font-black text-slate-400 uppercase"><span>Tolerance</span><span>{sm.tolerance.toFixed(1)}</span></div>
+                                <input type="range" min="0.1" max="2.0" step="0.1" value={sm.tolerance} onChange={(e) => handleSmoothingChange(cs, 'tolerance', parseFloat(e.target.value))} className="w-full h-1 appearance-none bg-slate-200 rounded-full accent-indigo-600" />
+                            </div>
+                            <div className="flex flex-col gap-0.5">
+                                <div className="flex justify-between items-center text-[7px] font-black text-slate-400 uppercase"><span>Offset</span><span>{(sm.offset || 0).toFixed(1)}</span></div>
+                                <input type="range" min="-5.0" max="5.0" step="0.1" value={sm.offset || 0} onChange={(e) => handleSmoothingChange(cs, 'offset', parseFloat(e.target.value))} className="w-full h-1 appearance-none bg-slate-200 rounded-full accent-indigo-600" />
+                            </div>
                           </div>
                         </div>
                       );
