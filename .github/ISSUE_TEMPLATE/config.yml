@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Development Workflow
+    url: https://github.com/popcoondev/dot-plate-pro/blob/main/docs/development-workflow.md
+    about: Review the team workflow before creating a ticket or pull request.

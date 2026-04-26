@@ -1,0 +1,92 @@
+name: Maintenance ticket
+description: Create a ticket for refactoring, dependency updates, security work, or investigation.
+title: "[Maintenance] "
+labels:
+  - maintenance
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for refactoring, dependency updates, security fixes, and investigation.
+        Technical debt and vulnerabilities are managed as tickets too.
+  - type: dropdown
+    id: category
+    attributes:
+      label: 種別
+      options:
+        - Refactor
+        - Dependency update
+        - Security
+        - Investigation
+    validations:
+      required: true
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 現在の課題、更新理由、技術的負債、リスクなどを書いてください。
+      placeholder: |-
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: target
+    attributes:
+      label: 対象
+      description: 更新対象や整理対象を書いてください。
+      placeholder: |-
+        - vite / rollup
+        - postcss
+        - App.jsx responsibilities
+    validations:
+      required: true
+  - type: textarea
+    id: bdd
+    attributes:
+      label: BDDシナリオ
+      description: 壊れてはいけない挙動か、調査完了時の観測可能な状態を書いてください。
+      placeholder: |-
+        Given ...
+        When ...
+        Then ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ条件
+      placeholder: |-
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: テスト観点
+      placeholder: |-
+        - npm run build
+        - npm run lint
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: implementation_notes
+    attributes:
+      label: 実装メモ
+      placeholder: |-
+        - ...
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 非対象
+      placeholder: |-
+        - ...
+  - type: input
+    id: branch_name
+    attributes:
+      label: ブランチ名
+      description: `feature/ticket-{id}-{slug}` の形式で記入してください。
+      placeholder: feature/ticket-125-vite-rollup-security
+    validations:
+      required: true

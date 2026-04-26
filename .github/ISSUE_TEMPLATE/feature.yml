@@ -1,0 +1,83 @@
+name: Feature ticket
+description: Create a ticket for one feature to be implemented in one branch and one PR.
+title: "[Feature] "
+labels:
+  - feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use one ticket for one feature.
+        This repository uses `1 ticket = 1 feature branch = 1 PR`.
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: なぜこの feature が必要かを書いてください。
+      placeholder: 現在の課題、ユーザー価値、作る理由
+    validations:
+      required: true
+  - type: textarea
+    id: user_story
+    attributes:
+      label: ユーザーストーリー
+      description: As a / I want / So that の形式で書いてください。
+      placeholder: |-
+        As a ...
+        I want ...
+        So that ...
+    validations:
+      required: true
+  - type: textarea
+    id: bdd
+    attributes:
+      label: BDDシナリオ
+      description: 最低 1 本の Given / When / Then を書いてください。
+      placeholder: |-
+        Given ...
+        When ...
+        Then ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ条件
+      description: レビュー前に満たすべき条件を書いてください。
+      placeholder: |-
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: テスト観点
+      description: 手動確認や自動確認の観点を書いてください。
+      placeholder: |-
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: implementation_notes
+    attributes:
+      label: 実装メモ
+      description: 想定する制約、依存、設計メモがあれば書いてください。
+      placeholder: |-
+        - ...
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 非対象
+      description: このチケットでやらないことを書いてください。
+      placeholder: |-
+        - ...
+  - type: input
+    id: branch_name
+    attributes:
+      label: ブランチ名
+      description: `feature/ticket-{id}-{slug}` の形式で記入してください。
+      placeholder: feature/ticket-123-example-feature
+    validations:
+      required: true

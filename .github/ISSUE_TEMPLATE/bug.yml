@@ -1,0 +1,90 @@
+name: Bug ticket
+description: Create a ticket for one bug fix with reproduction and post-fix behavior.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use one ticket for one bug fix.
+        Include both the reproduction behavior and the expected fixed behavior.
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 何が起きていて、なぜ直す必要があるかを書いてください。
+      placeholder: 現在の不具合、影響範囲、発生条件
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 再現手順
+      description: 手順、入力、端末条件などを書いてください。
+      placeholder: |-
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: bdd_before
+    attributes:
+      label: BDDシナリオ（再現）
+      description: 修正前の振る舞いを Given / When / Then で書いてください。
+      placeholder: |-
+        Given ...
+        When ...
+        Then ...
+    validations:
+      required: true
+  - type: textarea
+    id: bdd_after
+    attributes:
+      label: BDDシナリオ（修正後）
+      description: 修正後の期待挙動を Given / When / Then で書いてください。
+      placeholder: |-
+        Given ...
+        When ...
+        Then ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ条件
+      placeholder: |-
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: test_plan
+    attributes:
+      label: テスト観点
+      placeholder: |-
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: implementation_notes
+    attributes:
+      label: 実装メモ
+      placeholder: |-
+        - ...
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: 非対象
+      placeholder: |-
+        - ...
+  - type: input
+    id: branch_name
+    attributes:
+      label: ブランチ名
+      description: `feature/ticket-{id}-{slug}` の形式で記入してください。
+      placeholder: feature/ticket-124-fix-canvas-scroll
+    validations:
+      required: true
