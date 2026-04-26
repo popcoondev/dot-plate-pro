@@ -8,6 +8,7 @@
 バックログとチケット管理の正本は GitHub issue です。
 
 - [開発ワークフロー](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/development-workflow.md)
+- [App.jsx Responsibility Split Strategy](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/app-responsibility-split-strategy.md)
 - [JSON Format](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/json-format.md)
 
 ## Scripts
@@ -20,6 +21,6 @@
 ## Tech Stack
 
 - React 19
-- Vite 7
+- Vite 8
 - Tailwind CSS 4
 - Three.js

@@ -133,11 +133,12 @@ Then ...
 
 ## App.jsx の肥大化運用
 
-現状の [src/App.jsx](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/src/App.jsx) は 877 行です。
+現状の [src/App.jsx](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/src/App.jsx) は 938 行です。
 
 - 固定の行数閾値ではなく、責務増加を契機にチケット化する
 - UI、状態管理、3D処理、入出力、編集ツールなどの責務が増える場合は、機能チケットとは別に分割チケットを切る
 - 分割方針は「コンポーネント単位に分割していく」を基本にする
+- 具体的な責務マップと優先順位は [App.jsx Responsibility Split Strategy](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/app-responsibility-split-strategy.md) を参照する
 
 `Gemini.md` にはシングルファイル原則がありますが、これは現行制約として尊重しつつ、保守性課題はチケット化して解消対象にします。
 
