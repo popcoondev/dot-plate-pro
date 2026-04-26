@@ -9,6 +9,7 @@
 
 - [開発ワークフロー](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/development-workflow.md)
 - [App.jsx Responsibility Split Strategy](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/app-responsibility-split-strategy.md)
+- [Bundle Size Investigation](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/bundle-size-investigation.md)
 - [JSON Format](/Users/mn/Documents/Codex/2026-04-26/github-plugin-github-openai-curated-https/dot-plate-pro/docs/json-format.md)
 
 ## Scripts
