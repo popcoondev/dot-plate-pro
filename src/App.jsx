@@ -53,6 +53,12 @@ const MIN_RESOLUTION = 8;
 const MAX_RESOLUTION = 500;
 const DEFAULT_TARGET_COLOR_COUNT = 8;
 const SIMILAR_COLOR_DISTANCE_THRESHOLD = 0.04;
+const LAYER_SORT_OPTIONS = [
+  { value: 'current', label: 'Current Order' },
+  { value: 'usage-desc', label: 'Usage Count (High to Low)' },
+  { value: 'usage-asc', label: 'Usage Count (Low to High)' },
+  { value: 'hue', label: 'Hue' },
+];
 const apiKey = ""; 
 
 const TRANSPARENT_COLOR = [255, 0, 255];
@@ -80,6 +86,36 @@ const rgbToOklab = (rgb) => {
 };
 
 const getOklabDistance = (left, right) => Math.hypot(left.l - right.l, left.a - right.a, left.b - right.b);
+
+const rgbToHslLike = (rgb) => {
+  const r = rgb[0] / 255;
+  const g = rgb[1] / 255;
+  const b = rgb[2] / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  const lightness = (max + min) / 2;
+  let hue = 0;
+  let saturation = 0;
+
+  if (delta > 0) {
+    saturation = delta / (1 - Math.abs(2 * lightness - 1));
+    switch (max) {
+      case r:
+        hue = 60 * (((g - b) / delta) % 6);
+        break;
+      case g:
+        hue = 60 * (((b - r) / delta) + 2);
+        break;
+      default:
+        hue = 60 * (((r - g) / delta) + 4);
+        break;
+    }
+    if (hue < 0) hue += 360;
+  }
+
+  return { hue, saturation, lightness };
+};
 
 const createColorGrouper = (size) => {
   const parent = Array.from({ length: size }, (_, index) => index);
@@ -112,6 +148,43 @@ const collectUniqueColorStats = (pixels) => {
   }));
 
   return stats;
+};
+
+const getSortedLayerOrder = (layerOrder, pixels, mode) => {
+  if (mode === 'current' || !pixels || layerOrder.length < 2) return layerOrder;
+
+  const colorStats = collectUniqueColorStats(pixels);
+  const originalIndex = new Map(layerOrder.map((key, index) => [key, index]));
+  const enriched = layerOrder.map((key) => {
+    const color = JSON.parse(key);
+    const stats = colorStats.get(key);
+    const hsl = rgbToHslLike(color);
+    return {
+      key,
+      usageCount: stats?.count || 0,
+      hue: hsl.hue,
+      saturation: hsl.saturation,
+      lightness: hsl.lightness,
+    };
+  });
+
+  const sorted = [...enriched].sort((left, right) => {
+    if (mode === 'usage-desc' && right.usageCount !== left.usageCount) return right.usageCount - left.usageCount;
+    if (mode === 'usage-asc' && left.usageCount !== right.usageCount) return left.usageCount - right.usageCount;
+    if (mode === 'hue') {
+      const leftIsAchromatic = left.saturation < 0.05;
+      const rightIsAchromatic = right.saturation < 0.05;
+      if (leftIsAchromatic !== rightIsAchromatic) return leftIsAchromatic ? 1 : -1;
+      if (!leftIsAchromatic && left.hue !== right.hue) return left.hue - right.hue;
+      if (left.lightness !== right.lightness) return left.lightness - right.lightness;
+    }
+
+    const orderDiff = (originalIndex.get(left.key) ?? 0) - (originalIndex.get(right.key) ?? 0);
+    if (orderDiff !== 0) return orderDiff;
+    return left.key.localeCompare(right.key);
+  });
+
+  return sorted.map((entry) => entry.key);
 };
 
 const getRepresentativeKey = (keys, colorStats, layerOrderIndex) => [...keys].sort((left, right) => {
@@ -468,6 +541,7 @@ const App = () => {
   const [isResolutionToolbarVisible, setIsResolutionToolbarVisible] = useState(true);
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
   const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
+  const [layerSortMode, setLayerSortMode] = useState('current');
   
   const handleLayerHeightChange = (colorStr, key, delta) => setLayerHeightAdjustments(prev => {
     const current = prev[colorStr] || { plus: 0, minus: 0 };
@@ -526,12 +600,14 @@ const App = () => {
     if (Array.isArray(snapshot)) {
       setPixels(snapshot);
       syncLayersFromPixels(snapshot);
+      setLayerSortMode('current');
       return;
     }
     setPixels(snapshot.pixels);
     setLayerOrder(snapshot.layerOrder || []);
     setLayerHeightAdjustments(snapshot.layerHeightAdjustments || {});
     setLayerSmoothingSettings(snapshot.layerSmoothingSettings || {});
+    setLayerSortMode('current');
   }, [syncLayersFromPixels]);
 
   const pushToHistory = useCallback((p, overrides = {}) => {
@@ -884,8 +960,18 @@ const App = () => {
 
   const moveLayer = (idx, dir) => {
     const ni = idx + dir; if (ni < 0 || ni >= layerOrder.length) return;
-    const no = [...layerOrder]; const t = no[idx]; no[idx] = no[ni]; no[ni] = t; setLayerOrder(no);
+    const no = [...layerOrder]; const t = no[idx]; no[idx] = no[ni]; no[ni] = t; setLayerOrder(no); setLayerSortMode('current');
   };
+
+  const applyLayerSort = useCallback((mode) => {
+    setLayerSortMode(mode);
+    if (mode === 'current' || !pixels) return;
+    const nextLayerOrder = getSortedLayerOrder(layerOrder, pixels, mode);
+    if (nextLayerOrder.every((key, index) => key === layerOrder[index])) return;
+    setLayerOrder(nextLayerOrder);
+    pushToHistory(pixels, { layerOrder: nextLayerOrder });
+    setStatusMessage(`Layers sorted by ${LAYER_SORT_OPTIONS.find((option) => option.value === mode)?.label || mode}`);
+  }, [pixels, layerOrder, pushToHistory]);
 
   useEffect(() => {
     if (isLoadingRef.current) return;
@@ -1106,7 +1192,12 @@ const App = () => {
           )}
           {activeTab === 'layers' && (
             <div className="h-full flex flex-col px-6 py-4">
-              <h2 className="text-base font-black tracking-tight uppercase mb-4 flex items-center gap-2"><Layers className="text-indigo-600" size={18}/> Stack Order</h2>
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2"><Layers className="text-indigo-600" size={18}/> Stack Order</h2>
+                <select value={layerSortMode} onChange={(e) => applyLayerSort(e.target.value)} className="text-[10px] font-black uppercase tracking-widest px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 outline-none focus:border-indigo-400 transition">
+                  {LAYER_SORT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                </select>
+              </div>
               <div className="flex-1 overflow-auto space-y-2 pr-2 custom-scrollbar">
                 {(() => {
                   const chs = []; let ch = 0; layerOrder.forEach((cs) => { 
