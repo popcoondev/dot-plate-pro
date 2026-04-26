@@ -57,7 +57,8 @@ const LAYER_SORT_OPTIONS = [
   { value: 'current', label: 'Current Order' },
   { value: 'usage-desc', label: 'Usage Count (High to Low)' },
   { value: 'usage-asc', label: 'Usage Count (Low to High)' },
-  { value: 'hue', label: 'Hue' },
+  { value: 'hue-asc', label: 'Hue (Low to High)' },
+  { value: 'hue-desc', label: 'Hue (High to Low)' },
 ];
 const apiKey = ""; 
 
@@ -171,11 +172,11 @@ const getSortedLayerOrder = (layerOrder, pixels, mode) => {
   const sorted = [...enriched].sort((left, right) => {
     if (mode === 'usage-desc' && right.usageCount !== left.usageCount) return right.usageCount - left.usageCount;
     if (mode === 'usage-asc' && left.usageCount !== right.usageCount) return left.usageCount - right.usageCount;
-    if (mode === 'hue') {
+    if (mode === 'hue-asc' || mode === 'hue-desc') {
       const leftIsAchromatic = left.saturation < 0.05;
       const rightIsAchromatic = right.saturation < 0.05;
       if (leftIsAchromatic !== rightIsAchromatic) return leftIsAchromatic ? 1 : -1;
-      if (!leftIsAchromatic && left.hue !== right.hue) return left.hue - right.hue;
+      if (!leftIsAchromatic && left.hue !== right.hue) return mode === 'hue-asc' ? left.hue - right.hue : right.hue - left.hue;
       if (left.lightness !== right.lightness) return left.lightness - right.lightness;
     }
 
