@@ -271,7 +271,7 @@ const App = () => {
 
   const editorCanvasRef = useRef(null); const scrollContainerRef = useRef(null); const canvasWrapperRef = useRef(null);
   const threeRef = useRef(null); const sceneRef = useRef(null); const isDrawingRef = useRef(false);
-  const dragStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 }); const lastTouchDistRef = useRef(null);
+  const dragStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 }); const pinchZoomRef = useRef({ active: false, startDistance: 0, startZoom: 1, anchorX: 0, anchorY: 0, midpointX: 0, midpointY: 0 });
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 });
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   
@@ -500,10 +500,36 @@ const App = () => {
     }, 'image/png');
   }, [pixels, dotSize, isExporting, outputFileName]);
 
+  const getTouchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+  const getTouchMidpoint = (touches) => ({ x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 });
+  const resetPinchZoom = () => { pinchZoomRef.current = { active: false, startDistance: 0, startZoom: 1, anchorX: 0, anchorY: 0, midpointX: 0, midpointY: 0 }; };
+  const syncPinchAnchor = (nextZoom, midpointX, midpointY, anchorX, anchorY) => {
+    requestAnimationFrame(() => {
+      const canvas = editorCanvasRef.current;
+      const container = scrollContainerRef.current;
+      if (!canvas || !container) return;
+      const canvasRect = canvas.getBoundingClientRect();
+      const anchorScreenX = canvasRect.left + anchorX * 10 * nextZoom;
+      const anchorScreenY = canvasRect.top + anchorY * 10 * nextZoom;
+      container.scrollLeft += anchorScreenX - midpointX;
+      container.scrollTop += anchorScreenY - midpointY;
+    });
+  };
+
   const startDrawingNormal = (e) => {
     if (useVirtualPad || !editorCanvasRef.current) return;
     const cx = e.touches ? e.touches[0].clientX : e.clientX; const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    if (e.touches && e.touches.length === 2) { lastTouchDistRef.current = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY); return; }
+    if (e.touches && e.touches.length === 2) {
+      e.preventDefault();
+      const startDistance = getTouchDistance(e.touches);
+      const midpoint = getTouchMidpoint(e.touches);
+      const canvasRect = editorCanvasRef.current.getBoundingClientRect();
+      const anchorX = (midpoint.x - canvasRect.left) / (10 * zoom);
+      const anchorY = (midpoint.y - canvasRect.top) / (10 * zoom);
+      if (startDistance > 0) pinchZoomRef.current = { active: true, startDistance, startZoom: zoom, anchorX, anchorY, midpointX: midpoint.x, midpointY: midpoint.y };
+      isDrawingRef.current = false;
+      return;
+    }
     if (tool === 'hand') { isDrawingRef.current = true; const c = scrollContainerRef.current; dragStartRef.current = { x: cx, y: cy, scrollLeft: c.scrollLeft, scrollTop: c.scrollTop }; return; }
     const r = editorCanvasRef.current.getBoundingClientRect(); const x = Math.floor((cx - r.left) / (10 * zoom)); const y = Math.floor((cy - r.top) / (10 * zoom));
     if (x >= 0 && y >= 0 && x < (pixelsRef.current?.[0]?.length || 0) && y < (pixelsRef.current?.length || 0)) { isDrawingRef.current = true; handleToolAction(x, y, true); }
@@ -512,9 +538,23 @@ const App = () => {
   const drawMoveNormal = (e) => {
     if (useVirtualPad || !editorCanvasRef.current) return;
     const cx = e.touches ? e.touches[0].clientX : e.clientX; const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    if (e.touches && e.touches.length === 2 && lastTouchDistRef.current) {
-      const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-      setZoom(prev => Math.min(10, Math.max(0.05, prev * (d / lastTouchDistRef.current)))); lastTouchDistRef.current = d; return;
+    if (e.touches && e.touches.length === 2) {
+      e.preventDefault();
+      const distance = getTouchDistance(e.touches);
+      const midpoint = getTouchMidpoint(e.touches);
+      if (!pinchZoomRef.current.active && distance > 0) {
+        const canvasRect = editorCanvasRef.current.getBoundingClientRect();
+        const anchorX = (midpoint.x - canvasRect.left) / (10 * zoom);
+        const anchorY = (midpoint.y - canvasRect.top) / (10 * zoom);
+        pinchZoomRef.current = { active: true, startDistance: distance, startZoom: zoom, anchorX, anchorY, midpointX: midpoint.x, midpointY: midpoint.y };
+      }
+      const { active, startDistance, startZoom, anchorX, anchorY } = pinchZoomRef.current;
+      if (active && startDistance > 0 && distance > 0) {
+        const nextZoom = Math.min(10, Math.max(0.05, startZoom * (distance / startDistance)));
+        setZoom(nextZoom);
+        syncPinchAnchor(nextZoom, midpoint.x, midpoint.y, anchorX, anchorY);
+      }
+      return;
     }
     if (!isDrawingRef.current) return;
     if (tool === 'hand') { const c = scrollContainerRef.current; c.scrollLeft = dragStartRef.current.scrollLeft - (cx - dragStartRef.current.x); c.scrollTop = dragStartRef.current.scrollTop - (cy - dragStartRef.current.y); return; }
@@ -522,7 +562,7 @@ const App = () => {
     if (x >= 0 && y >= 0 && x < (pixelsRef.current?.[0]?.length || 0) && y < (pixelsRef.current?.length || 0)) handleToolAction(x, y, false);
   };
 
-  const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; lastTouchDistRef.current = null; };
+  const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; resetPinchZoom(); };
   const handleTrackpadStart = (e) => { e.preventDefault(); const cx = e.touches ? e.touches[0].clientX : e.clientX; const cy = e.touches ? e.touches[0].clientY : e.clientY; lastTrackpadPosRef.current = { x: cx, y: cy }; isDrawingRef.current = true; };
   const handleTrackpadMove = (e) => {
     if (!isDrawingRef.current) return; e.preventDefault();
@@ -702,7 +742,7 @@ const App = () => {
                 )}
               </div>
               <div className={`flex-1 flex ${showOriginal ? 'flex-col lg:flex-row' : 'flex-col'} overflow-hidden relative`}>
-                <div ref={scrollContainerRef} className={`flex-1 relative bg-slate-50/30 custom-scrollbar ${tool === 'hand' && !useVirtualPad ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`} style={{ overflow: isCanvasLocked ? 'hidden' : 'auto' }} onMouseDown={startDrawingNormal} onMouseMove={drawMoveNormal} onMouseUp={stopDrawingNormal} onMouseLeave={stopDrawingNormal} onTouchStart={startDrawingNormal} onTouchMove={drawMoveNormal} onTouchEnd={stopDrawingNormal}>
+                <div ref={scrollContainerRef} className={`flex-1 relative bg-slate-50/30 custom-scrollbar ${tool === 'hand' && !useVirtualPad ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`} style={{ overflow: isCanvasLocked ? 'hidden' : 'auto', touchAction: 'none', overscrollBehavior: 'contain' }} onMouseDown={startDrawingNormal} onMouseMove={drawMoveNormal} onMouseUp={stopDrawingNormal} onMouseLeave={stopDrawingNormal} onTouchStart={startDrawingNormal} onTouchMove={drawMoveNormal} onTouchEnd={stopDrawingNormal}>
                   {!pixels ? (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
                       <div className="p-6 bg-white rounded-[1.5rem] shadow-xl border border-slate-100 text-center">
