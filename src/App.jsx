@@ -51,10 +51,151 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 const MAX_UNDO = 15;
 const MIN_RESOLUTION = 8;
 const MAX_RESOLUTION = 500;
+const SIMILAR_COLOR_DISTANCE_THRESHOLD = 0.04;
 const apiKey = ""; 
 
 const TRANSPARENT_COLOR = [255, 0, 255];
 const TRANSPARENT_KEY = JSON.stringify(TRANSPARENT_COLOR);
+
+const srgbToLinear = (channel) => {
+  const normalized = channel / 255;
+  return normalized <= 0.04045 ? normalized / 12.92 : Math.pow((normalized + 0.055) / 1.055, 2.4);
+};
+
+const rgbToOklab = (rgb) => {
+  const r = srgbToLinear(rgb[0]);
+  const g = srgbToLinear(rgb[1]);
+  const b = srgbToLinear(rgb[2]);
+
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+
+  return {
+    l: 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    a: 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    b: 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+  };
+};
+
+const getOklabDistance = (left, right) => Math.hypot(left.l - right.l, left.a - right.a, left.b - right.b);
+
+const createColorGrouper = (size) => {
+  const parent = Array.from({ length: size }, (_, index) => index);
+
+  const find = (index) => {
+    if (parent[index] !== index) parent[index] = find(parent[index]);
+    return parent[index];
+  };
+
+  const union = (left, right) => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) parent[rightRoot] = leftRoot;
+  };
+
+  return { find, union };
+};
+
+const collectUniqueColorStats = (pixels) => {
+  const stats = new Map();
+  let scanIndex = 0;
+
+  pixels.forEach((row) => row.forEach((pixel) => {
+    if (!Array.isArray(pixel)) return;
+    const key = JSON.stringify(pixel);
+    if (key === TRANSPARENT_KEY) return;
+    if (!stats.has(key)) stats.set(key, { color: pixel, count: 0, firstIndex: scanIndex });
+    stats.get(key).count += 1;
+    scanIndex += 1;
+  }));
+
+  return stats;
+};
+
+const buildMergedColorState = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings) => {
+  if (!pixels) return null;
+
+  const colorStats = collectUniqueColorStats(pixels);
+  const entries = Array.from(colorStats.entries());
+  if (entries.length < 2) return null;
+
+  const grouper = createColorGrouper(entries.length);
+  const oklabColors = entries.map(([, info]) => rgbToOklab(info.color));
+
+  for (let left = 0; left < entries.length; left++) {
+    for (let right = left + 1; right < entries.length; right++) {
+      if (getOklabDistance(oklabColors[left], oklabColors[right]) <= SIMILAR_COLOR_DISTANCE_THRESHOLD) {
+        grouper.union(left, right);
+      }
+    }
+  }
+
+  const groupedKeys = new Map();
+  entries.forEach(([key], index) => {
+    const root = grouper.find(index);
+    if (!groupedKeys.has(root)) groupedKeys.set(root, []);
+    groupedKeys.get(root).push(key);
+  });
+
+  const layerOrderIndex = new Map(layerOrder.map((key, index) => [key, index]));
+  const replacementMap = new Map();
+  const representativeKeys = new Set();
+  let mergedGroups = 0;
+
+  groupedKeys.forEach((keys) => {
+    if (keys.length === 1) {
+      representativeKeys.add(keys[0]);
+      replacementMap.set(keys[0], keys[0]);
+      return;
+    }
+
+    mergedGroups += 1;
+    const representativeKey = [...keys].sort((left, right) => {
+      const leftInfo = colorStats.get(left);
+      const rightInfo = colorStats.get(right);
+      if (rightInfo.count !== leftInfo.count) return rightInfo.count - leftInfo.count;
+      const leftLayerIndex = layerOrderIndex.has(left) ? layerOrderIndex.get(left) : Number.POSITIVE_INFINITY;
+      const rightLayerIndex = layerOrderIndex.has(right) ? layerOrderIndex.get(right) : Number.POSITIVE_INFINITY;
+      if (leftLayerIndex !== rightLayerIndex) return leftLayerIndex - rightLayerIndex;
+      return leftInfo.firstIndex - rightInfo.firstIndex;
+    })[0];
+
+    representativeKeys.add(representativeKey);
+    keys.forEach((key) => replacementMap.set(key, representativeKey));
+  });
+
+  if (mergedGroups === 0) return null;
+
+  const nextPixels = pixels.map((row) => row.map((pixel) => {
+    if (!Array.isArray(pixel)) return pixel;
+    const key = JSON.stringify(pixel);
+    const replacementKey = replacementMap.get(key);
+    return replacementKey ? JSON.parse(replacementKey) : pixel;
+  }));
+
+  const nextLayerOrder = [
+    ...layerOrder.filter((key) => representativeKeys.has(key)),
+    ...entries.map(([key]) => key).filter((key) => representativeKeys.has(key) && !layerOrder.includes(key)),
+  ];
+
+  const nextLayerHeightAdjustments = Object.fromEntries(
+    Object.entries(layerHeightAdjustments).filter(([key]) => representativeKeys.has(key))
+  );
+  const nextLayerSmoothingSettings = Object.fromEntries(
+    Object.entries(layerSmoothingSettings).filter(([key]) => representativeKeys.has(key))
+  );
+
+  return {
+    nextPixels,
+    nextLayerOrder,
+    nextLayerHeightAdjustments,
+    nextLayerSmoothingSettings,
+    beforeCount: entries.length,
+    afterCount: representativeKeys.size,
+    replacementMap,
+  };
+};
 
 // --- ユーティリティ: 経路簡略化 (Ramer-Douglas-Peucker) ---
 const getDistance = (p, p1, p2) => {
@@ -275,8 +416,12 @@ const App = () => {
   const originalDragRef = useRef({ active: false, x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 });
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
+  const layerOrderRef = useRef(layerOrder); const layerHeightAdjustmentsRef = useRef(layerHeightAdjustments); const layerSmoothingSettingsRef = useRef(layerSmoothingSettings);
   
   useEffect(() => { pixelsRef.current = pixels; }, [pixels]);
+  useEffect(() => { layerOrderRef.current = layerOrder; }, [layerOrder]);
+  useEffect(() => { layerHeightAdjustmentsRef.current = layerHeightAdjustments; }, [layerHeightAdjustments]);
+  useEffect(() => { layerSmoothingSettingsRef.current = layerSmoothingSettings; }, [layerSmoothingSettings]);
   useEffect(() => { if (!projectName && !isLoadingRef.current) { const def = getFormattedDate("compact"); setProjectName(def); setOutputFileName(def); } }, []);
   const handleProjectNameChange = (val) => { setProjectName(val); if (outputFileName === projectName || !outputFileName) setOutputFileName(val); };
   const centerCanvas = useCallback(() => {
@@ -304,23 +449,69 @@ const App = () => {
     });
   }, []);
 
-  const pushToHistory = useCallback((p) => {
-    if (!p) return; const s = JSON.stringify(p);
+  const createHistorySnapshot = useCallback((nextPixels, overrides = {}) => ({
+    pixels: nextPixels,
+    layerOrder: overrides.layerOrder ?? layerOrderRef.current,
+    layerHeightAdjustments: overrides.layerHeightAdjustments ?? layerHeightAdjustmentsRef.current,
+    layerSmoothingSettings: overrides.layerSmoothingSettings ?? layerSmoothingSettingsRef.current,
+  }), []);
+
+  const restoreHistorySnapshot = useCallback((snapshot) => {
+    if (Array.isArray(snapshot)) {
+      setPixels(snapshot);
+      syncLayersFromPixels(snapshot);
+      return;
+    }
+    setPixels(snapshot.pixels);
+    setLayerOrder(snapshot.layerOrder || []);
+    setLayerHeightAdjustments(snapshot.layerHeightAdjustments || {});
+    setLayerSmoothingSettings(snapshot.layerSmoothingSettings || {});
+  }, [syncLayersFromPixels]);
+
+  const pushToHistory = useCallback((p, overrides = {}) => {
+    if (!p) return; const s = JSON.stringify(createHistorySnapshot(p, overrides));
     setHistory(prev => {
         const n = prev.stack.slice(0, prev.step + 1); n.push(s); if (n.length > MAX_UNDO) n.shift();
         return { stack: n, step: n.length - 1 };
     });
-  }, []);
+  }, [createHistorySnapshot]);
 
   const undo = useCallback(() => setHistory(prev => {
-    if (prev.step > 0) { const p = JSON.parse(prev.stack[prev.step - 1]); setPixels(p); syncLayersFromPixels(p); return { ...prev, step: prev.step - 1 }; }
+    if (prev.step > 0) { const p = JSON.parse(prev.stack[prev.step - 1]); restoreHistorySnapshot(p); return { ...prev, step: prev.step - 1 }; }
     return prev;
-  }), [syncLayersFromPixels]);
+  }), [restoreHistorySnapshot]);
 
   const redo = useCallback(() => setHistory(prev => {
-    if (prev.step < prev.stack.length - 1) { const n = JSON.parse(prev.stack[prev.step + 1]); setPixels(n); syncLayersFromPixels(n); return { ...prev, step: prev.step + 1 }; }
+    if (prev.step < prev.stack.length - 1) { const n = JSON.parse(prev.stack[prev.step + 1]); restoreHistorySnapshot(n); return { ...prev, step: prev.step + 1 }; }
     return prev;
-  }), [syncLayersFromPixels]);
+  }), [restoreHistorySnapshot]);
+
+  const uniqueColorCount = pixels ? collectUniqueColorStats(pixels).size : 0;
+
+  const mergeSimilarColors = useCallback(() => {
+    if (!pixels) return;
+    const mergedState = buildMergedColorState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings);
+    if (!mergedState) {
+      setStatusMessage(`No similar colors found. ${uniqueColorCount} colors unchanged.`);
+      return;
+    }
+
+    setPixels(mergedState.nextPixels);
+    setLayerOrder(mergedState.nextLayerOrder);
+    setLayerHeightAdjustments(mergedState.nextLayerHeightAdjustments);
+    setLayerSmoothingSettings(mergedState.nextLayerSmoothingSettings);
+
+    const currentColorKey = JSON.stringify(currentColor);
+    const replacementKey = mergedState.replacementMap.get(currentColorKey);
+    if (replacementKey && replacementKey !== currentColorKey) setCurrentColor(JSON.parse(replacementKey));
+
+    pushToHistory(mergedState.nextPixels, {
+      layerOrder: mergedState.nextLayerOrder,
+      layerHeightAdjustments: mergedState.nextLayerHeightAdjustments,
+      layerSmoothingSettings: mergedState.nextLayerSmoothingSettings,
+    });
+    setStatusMessage(`${mergedState.beforeCount} colors -> ${mergedState.afterCount} colors`);
+  }, [pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, currentColor, pushToHistory, uniqueColorCount]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -464,13 +655,13 @@ const App = () => {
           setGridSize(d.gridSize); setDotSize(d.dotSize); setLayerThickness(d.layerThickness); setBaseThickness(d.baseThickness);
           setPadSensitivity(d.padSensitivity); setLayerOrder(d.layerOrder || []); setSourceImage(d.sourceImage || null); setPixels(d.pixels);
           setLayerHeightAdjustments(d.layerHeightAdjustments || {}); setLayerSmoothingSettings(d.layerSmoothingSettings || {});
-          setHistory({ stack: [JSON.stringify(d.pixels)], step: 0 }); setStatusMessage("プロジェクトを復元しました！📂");
+          setHistory({ stack: [JSON.stringify(createHistorySnapshot(d.pixels, { layerOrder: d.layerOrder || [], layerHeightAdjustments: d.layerHeightAdjustments || {}, layerSmoothingSettings: d.layerSmoothingSettings || {} }))], step: 0 }); setStatusMessage("プロジェクトを復元しました！📂");
           setTimeout(() => { isLoadingRef.current = false; centerCanvas(); }, 100);
         }
       } catch (err) { setStatusMessage("読み込みエラー。"); }
     };
     r.readAsText(f); e.target.value = '';
-  }, [centerCanvas]);
+  }, [centerCanvas, createHistorySnapshot]);
 
   const exportSTL = () => {
     if (!sceneRef.current) return; const ex = new STLExporter();
@@ -912,6 +1103,18 @@ const App = () => {
                     <div className="space-y-1.5"><label className="text-[9px] font-black text-slate-500 flex justify-between px-1 uppercase">Base Plate <span>{baseThickness.toFixed(1)}mm</span></label><input type="range" min="0.0" max="5.0" step="0.1" value={baseThickness} onChange={e => setBaseThickness(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-200 rounded-full" /></div>
                     <div className="space-y-1.5 pt-3 border-t border-slate-100"><label className="text-[9px] font-black text-indigo-500 flex justify-between px-1 uppercase">Pad Sensitivity <span>{padSensitivity}</span></label><input type="range" min="1" max="20" step="1" value={padSensitivity} onChange={e => setPadSensitivity(parseInt(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-200 rounded-full" /></div>
                   </div>
+                </div>
+                <div className="bg-slate-50 p-5 rounded-[1.5rem] border border-slate-100 space-y-4 shadow-inner">
+                  <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">Similar Color Merge</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Current Unique Colors</p>
+                      <p className="text-lg font-black text-slate-800">{uniqueColorCount}</p>
+                    </div>
+                    <button onClick={mergeSimilarColors} disabled={!pixels || uniqueColorCount < 2} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Merge Similar Colors</button>
+                  </div>
+                  <p className="text-[9px] text-slate-500 leading-relaxed">Uses a weak OKLab distance threshold to merge only visually similar non-transparent colors into a single representative layer color.</p>
+                  {statusMessage && <p className="text-[9px] font-bold text-indigo-600 bg-white border border-indigo-100 rounded-xl px-3 py-2">{statusMessage}</p>}
                 </div>
               </div><button onClick={() => setShowConfirmModal(true)} className="w-full mt-6 py-3 bg-rose-50 text-rose-500 rounded-[1.5rem] font-black text-[10px] border border-rose-100 uppercase tracking-widest transition hover:bg-rose-100 shadow-sm mb-4">Clear Canvas</button>
             </div>
