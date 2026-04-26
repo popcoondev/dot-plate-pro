@@ -51,6 +51,7 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 const MAX_UNDO = 15;
 const MIN_RESOLUTION = 8;
 const MAX_RESOLUTION = 500;
+const DEFAULT_TARGET_COLOR_COUNT = 8;
 const SIMILAR_COLOR_DISTANCE_THRESHOLD = 0.04;
 const apiKey = ""; 
 
@@ -113,32 +114,20 @@ const collectUniqueColorStats = (pixels) => {
   return stats;
 };
 
-const buildMergedColorState = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings) => {
-  if (!pixels) return null;
+const getRepresentativeKey = (keys, colorStats, layerOrderIndex) => [...keys].sort((left, right) => {
+  const leftInfo = colorStats.get(left);
+  const rightInfo = colorStats.get(right);
+  if (rightInfo.count !== leftInfo.count) return rightInfo.count - leftInfo.count;
+  const leftLayerIndex = layerOrderIndex.has(left) ? layerOrderIndex.get(left) : Number.POSITIVE_INFINITY;
+  const rightLayerIndex = layerOrderIndex.has(right) ? layerOrderIndex.get(right) : Number.POSITIVE_INFINITY;
+  if (leftLayerIndex !== rightLayerIndex) return leftLayerIndex - rightLayerIndex;
+  return leftInfo.firstIndex - rightInfo.firstIndex;
+})[0];
 
-  const colorStats = collectUniqueColorStats(pixels);
+const buildColorStateFromGroups = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, colorStats, groupedKeys) => {
   const entries = Array.from(colorStats.entries());
-  if (entries.length < 2) return null;
-
-  const grouper = createColorGrouper(entries.length);
-  const oklabColors = entries.map(([, info]) => rgbToOklab(info.color));
-
-  for (let left = 0; left < entries.length; left++) {
-    for (let right = left + 1; right < entries.length; right++) {
-      if (getOklabDistance(oklabColors[left], oklabColors[right]) <= SIMILAR_COLOR_DISTANCE_THRESHOLD) {
-        grouper.union(left, right);
-      }
-    }
-  }
-
-  const groupedKeys = new Map();
-  entries.forEach(([key], index) => {
-    const root = grouper.find(index);
-    if (!groupedKeys.has(root)) groupedKeys.set(root, []);
-    groupedKeys.get(root).push(key);
-  });
-
   const layerOrderIndex = new Map(layerOrder.map((key, index) => [key, index]));
+
   const replacementMap = new Map();
   const representativeKeys = new Set();
   let mergedGroups = 0;
@@ -151,16 +140,7 @@ const buildMergedColorState = (pixels, layerOrder, layerHeightAdjustments, layer
     }
 
     mergedGroups += 1;
-    const representativeKey = [...keys].sort((left, right) => {
-      const leftInfo = colorStats.get(left);
-      const rightInfo = colorStats.get(right);
-      if (rightInfo.count !== leftInfo.count) return rightInfo.count - leftInfo.count;
-      const leftLayerIndex = layerOrderIndex.has(left) ? layerOrderIndex.get(left) : Number.POSITIVE_INFINITY;
-      const rightLayerIndex = layerOrderIndex.has(right) ? layerOrderIndex.get(right) : Number.POSITIVE_INFINITY;
-      if (leftLayerIndex !== rightLayerIndex) return leftLayerIndex - rightLayerIndex;
-      return leftInfo.firstIndex - rightInfo.firstIndex;
-    })[0];
-
+    const representativeKey = getRepresentativeKey(keys, colorStats, layerOrderIndex);
     representativeKeys.add(representativeKey);
     keys.forEach((key) => replacementMap.set(key, representativeKey));
   });
@@ -195,6 +175,91 @@ const buildMergedColorState = (pixels, layerOrder, layerHeightAdjustments, layer
     afterCount: representativeKeys.size,
     replacementMap,
   };
+};
+
+const buildMergedColorState = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings) => {
+  if (!pixels) return null;
+
+  const colorStats = collectUniqueColorStats(pixels);
+  const entries = Array.from(colorStats.entries());
+  if (entries.length < 2) return null;
+
+  const grouper = createColorGrouper(entries.length);
+  const oklabColors = entries.map(([, info]) => rgbToOklab(info.color));
+
+  for (let left = 0; left < entries.length; left++) {
+    for (let right = left + 1; right < entries.length; right++) {
+      if (getOklabDistance(oklabColors[left], oklabColors[right]) <= SIMILAR_COLOR_DISTANCE_THRESHOLD) {
+        grouper.union(left, right);
+      }
+    }
+  }
+
+  const groupedKeys = [];
+  const groupMap = new Map();
+  entries.forEach(([key], index) => {
+    const root = grouper.find(index);
+    if (!groupMap.has(root)) groupMap.set(root, []);
+    groupMap.get(root).push(key);
+  });
+  groupMap.forEach((keys) => groupedKeys.push(keys));
+
+  return buildColorStateFromGroups(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, colorStats, groupedKeys);
+};
+
+const buildReducedColorState = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, targetCount) => {
+  if (!pixels) return null;
+
+  const colorStats = collectUniqueColorStats(pixels);
+  const entries = Array.from(colorStats.entries());
+  if (entries.length < 2 || targetCount >= entries.length) return null;
+
+  let clusters = entries.map(([key, info]) => {
+    const centroid = rgbToOklab(info.color);
+    return { keys: [key], weight: info.count, centroid };
+  });
+
+  while (clusters.length > targetCount) {
+    let bestLeft = 0;
+    let bestRight = 1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (let left = 0; left < clusters.length; left++) {
+      for (let right = left + 1; right < clusters.length; right++) {
+        const distance = getOklabDistance(clusters[left].centroid, clusters[right].centroid);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestLeft = left;
+          bestRight = right;
+        }
+      }
+    }
+
+    const leftCluster = clusters[bestLeft];
+    const rightCluster = clusters[bestRight];
+    const mergedWeight = leftCluster.weight + rightCluster.weight;
+    const mergedCluster = {
+      keys: [...leftCluster.keys, ...rightCluster.keys],
+      weight: mergedWeight,
+      centroid: {
+        l: (leftCluster.centroid.l * leftCluster.weight + rightCluster.centroid.l * rightCluster.weight) / mergedWeight,
+        a: (leftCluster.centroid.a * leftCluster.weight + rightCluster.centroid.a * rightCluster.weight) / mergedWeight,
+        b: (leftCluster.centroid.b * leftCluster.weight + rightCluster.centroid.b * rightCluster.weight) / mergedWeight,
+      },
+    };
+
+    clusters = clusters.filter((_, index) => index !== bestLeft && index !== bestRight);
+    clusters.push(mergedCluster);
+  }
+
+  return buildColorStateFromGroups(
+    pixels,
+    layerOrder,
+    layerHeightAdjustments,
+    layerSmoothingSettings,
+    colorStats,
+    clusters.map((cluster) => cluster.keys)
+  );
 };
 
 // --- ユーティリティ: 経路簡略化 (Ramer-Douglas-Peucker) ---
@@ -402,6 +467,7 @@ const App = () => {
   const [sampleOffsetX, setSampleOffsetX] = useState(0); const [sampleOffsetY, setSampleOffsetY] = useState(0);
   const [isResolutionToolbarVisible, setIsResolutionToolbarVisible] = useState(true);
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
+  const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
   
   const handleLayerHeightChange = (colorStr, key, delta) => setLayerHeightAdjustments(prev => {
     const current = prev[colorStr] || { plus: 0, minus: 0 };
@@ -488,14 +554,7 @@ const App = () => {
 
   const uniqueColorCount = pixels ? collectUniqueColorStats(pixels).size : 0;
 
-  const mergeSimilarColors = useCallback(() => {
-    if (!pixels) return;
-    const mergedState = buildMergedColorState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings);
-    if (!mergedState) {
-      setStatusMessage(`No similar colors found. ${uniqueColorCount} colors unchanged.`);
-      return;
-    }
-
+  const applyMergedColorState = useCallback((mergedState) => {
     setPixels(mergedState.nextPixels);
     setLayerOrder(mergedState.nextLayerOrder);
     setLayerHeightAdjustments(mergedState.nextLayerHeightAdjustments);
@@ -511,7 +570,32 @@ const App = () => {
       layerSmoothingSettings: mergedState.nextLayerSmoothingSettings,
     });
     setStatusMessage(`${mergedState.beforeCount} colors -> ${mergedState.afterCount} colors`);
-  }, [pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, currentColor, pushToHistory, uniqueColorCount]);
+  }, [currentColor, pushToHistory]);
+
+  const mergeSimilarColors = useCallback(() => {
+    if (!pixels) return;
+    const mergedState = buildMergedColorState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings);
+    if (!mergedState) {
+      setStatusMessage(`No similar colors found. ${uniqueColorCount} colors unchanged.`);
+      return;
+    }
+    applyMergedColorState(mergedState);
+  }, [pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, applyMergedColorState, uniqueColorCount]);
+
+  const reduceColorsToTarget = useCallback(() => {
+    if (!pixels) return;
+    const safeTarget = Math.max(1, Math.floor(Number(targetColorCount) || DEFAULT_TARGET_COLOR_COUNT));
+    if (safeTarget >= uniqueColorCount) {
+      setStatusMessage(`Target already reached. ${uniqueColorCount} colors unchanged.`);
+      return;
+    }
+    const reducedState = buildReducedColorState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, safeTarget);
+    if (!reducedState) {
+      setStatusMessage(`Unable to reduce below ${uniqueColorCount} colors.`);
+      return;
+    }
+    applyMergedColorState(reducedState);
+  }, [pixels, targetColorCount, uniqueColorCount, layerOrder, layerHeightAdjustments, layerSmoothingSettings, applyMergedColorState]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -1114,6 +1198,14 @@ const App = () => {
                     <button onClick={mergeSimilarColors} disabled={!pixels || uniqueColorCount < 2} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Merge Similar Colors</button>
                   </div>
                   <p className="text-[9px] text-slate-500 leading-relaxed">Uses a weak OKLab distance threshold to merge only visually similar non-transparent colors into a single representative layer color.</p>
+                  <div className="pt-3 border-t border-slate-100 space-y-2">
+                    <label className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Target Color Count</label>
+                    <div className="flex items-center gap-2">
+                      <input type="number" min="1" max={Math.max(1, uniqueColorCount)} value={targetColorCount} onChange={(e) => setTargetColorCount(e.target.value)} className="w-20 text-xs p-2 rounded-xl border border-slate-200 bg-white outline-none focus:border-indigo-400 transition" />
+                      <button onClick={reduceColorsToTarget} disabled={!pixels || uniqueColorCount < 2} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Reduce to Target</button>
+                    </div>
+                    <p className="text-[9px] text-slate-500 leading-relaxed">Greedily merges the closest visible color groups until the canvas reaches the target count.</p>
+                  </div>
                   {statusMessage && <p className="text-[9px] font-bold text-indigo-600 bg-white border border-indigo-100 rounded-xl px-3 py-2">{statusMessage}</p>}
                 </div>
               </div><button onClick={() => setShowConfirmModal(true)} className="w-full mt-6 py-3 bg-rose-50 text-rose-500 rounded-[1.5rem] font-black text-[10px] border border-rose-100 uppercase tracking-widest transition hover:bg-rose-100 shadow-sm mb-4">Clear Canvas</button>
