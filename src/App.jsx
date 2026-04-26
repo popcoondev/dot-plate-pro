@@ -269,9 +269,10 @@ const App = () => {
   });
   const handleSmoothingChange = (colorStr, key, value) => setLayerSmoothingSettings(prev => ({ ...prev, [colorStr]: { ...(prev[colorStr] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 }), [key]: value } }));
 
-  const editorCanvasRef = useRef(null); const scrollContainerRef = useRef(null); const canvasWrapperRef = useRef(null);
+  const editorCanvasRef = useRef(null); const scrollContainerRef = useRef(null); const canvasWrapperRef = useRef(null); const originalImageContainerRef = useRef(null);
   const threeRef = useRef(null); const sceneRef = useRef(null); const isDrawingRef = useRef(false);
   const dragStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 }); const pinchZoomRef = useRef({ active: false, startDistance: 0, startZoom: 1, anchorX: 0, anchorY: 0, midpointX: 0, midpointY: 0 });
+  const originalDragRef = useRef({ active: false, x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 });
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   
@@ -564,6 +565,24 @@ const App = () => {
   };
 
   const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; resetPinchZoom(); };
+  const startOriginalImageDrag = (e) => {
+    const container = originalImageContainerRef.current;
+    if (!container) return;
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    originalDragRef.current = { active: true, x: cx, y: cy, scrollLeft: container.scrollLeft, scrollTop: container.scrollTop };
+  };
+  const moveOriginalImageDrag = (e) => {
+    if (!originalDragRef.current.active) return;
+    const container = originalImageContainerRef.current;
+    if (!container) return;
+    if (e.touches) e.preventDefault();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    container.scrollLeft = originalDragRef.current.scrollLeft - (cx - originalDragRef.current.x);
+    container.scrollTop = originalDragRef.current.scrollTop - (cy - originalDragRef.current.y);
+  };
+  const stopOriginalImageDrag = () => { originalDragRef.current.active = false; };
   const handleTrackpadStart = (e) => { e.preventDefault(); const cx = e.touches ? e.touches[0].clientX : e.clientX; const cy = e.touches ? e.touches[0].clientY : e.clientY; lastTrackpadPosRef.current = { x: cx, y: cy }; isDrawingRef.current = true; };
   const handleTrackpadMove = (e) => {
     if (!isDrawingRef.current) return; e.preventDefault();
@@ -769,7 +788,7 @@ const App = () => {
                 </div>
                 {pixels && !useVirtualPad && (<button onClick={() => setIsCanvasLocked(!isCanvasLocked)} className={`absolute top-4 right-4 z-50 p-2.5 rounded-xl transition-all shadow-lg border ${isCanvasLocked ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white/50 backdrop-blur-md text-slate-700 border-white/20'}`}>{isCanvasLocked ? <Lock size={16} /> : <Unlock size={16} />}</button>)}
                 {showOriginal && sourceImage && (
-                  <div className="flex-1 relative overflow-auto bg-slate-100/50 border-t border-slate-100 custom-scrollbar text-center">
+                  <div ref={originalImageContainerRef} className="flex-1 relative overflow-auto bg-slate-100/50 border-t border-slate-100 custom-scrollbar text-center cursor-grab active:cursor-grabbing" style={{ touchAction: 'none' }} onMouseDown={startOriginalImageDrag} onMouseMove={moveOriginalImageDrag} onMouseUp={stopOriginalImageDrag} onMouseLeave={stopOriginalImageDrag} onTouchStart={startOriginalImageDrag} onTouchMove={moveOriginalImageDrag} onTouchEnd={stopOriginalImageDrag}>
                     <div className="p-8 min-h-full min-w-full flex items-center justify-center"><img src={sourceImage} style={{ width: `${Math.max(1, 100 * pipZoom)}%`, height: 'auto', maxWidth: 'none' }} className="pointer-events-none shadow-2xl rounded-lg" alt="Reference" /></div>
                     <div className="absolute top-4 left-4 bg-slate-900/80 text-white text-[8px] px-2 py-1 font-black rounded-lg backdrop-blur-md pointer-events-none uppercase tracking-widest">Original Image</div>
                     <div className="absolute bottom-20 right-4 z-50 pointer-events-auto flex items-center gap-1 bg-white/85 backdrop-blur-md shadow-xl rounded-2xl px-1.5 py-1 border border-white">
