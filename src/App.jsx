@@ -287,10 +287,11 @@ const App = () => {
   useEffect(() => { if (pixels && activeTab === 'editor') setTimeout(centerCanvas, 100); }, [pixels === null, activeTab, showOriginal]);
   useEffect(() => {
     const prev = (e) => { if (toolbarRef.current && toolbarRef.current.contains(e.target)) return; e.preventDefault(); };
-    if (isCanvasLocked) document.body.addEventListener('touchmove', prev, { passive: false });
-    else document.body.removeEventListener('touchmove', prev);
-    return () => document.body.removeEventListener('touchmove', prev);
-  }, [isCanvasLocked]);
+    const container = scrollContainerRef.current;
+    if (!container || !isCanvasLocked || activeTab !== 'editor') return;
+    container.addEventListener('touchmove', prev, { passive: false });
+    return () => container.removeEventListener('touchmove', prev);
+  }, [isCanvasLocked, activeTab]);
 
   const syncLayersFromPixels = useCallback((curr) => {
     if (!curr) { setLayerOrder([]); return; }
