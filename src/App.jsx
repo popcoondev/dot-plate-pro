@@ -840,7 +840,7 @@ const App = () => {
   const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
   const [layerSortMode, setLayerSortMode] = useState('current');
   const [suggestedMixBaseColors, setSuggestedMixBaseColors] = useState([]);
-  const [customMixBaseHexes, setCustomMixBaseHexes] = useState(['#FF0000', '#00FF00', '#0000FF', '#FFFFFF']);
+  const [customMixBaseHexes, setCustomMixBaseHexes] = useState(['', '', '', '']);
   const [colorMixAdvisorResult, setColorMixAdvisorResult] = useState(null);
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
@@ -935,6 +935,9 @@ const App = () => {
   }), [restoreHistorySnapshot]);
 
   const uniqueColorCount = pixels ? collectUniqueColorStats(pixels).size : 0;
+  const modelSuggestedMixBaseColors = pixels ? suggestIdealMixBaseColors(pixels, COLOR_MIX_BASE_COUNT) : [];
+  const fallbackMixBaseHexes = Array.from({ length: COLOR_MIX_BASE_COUNT }, (_, index) => modelSuggestedMixBaseColors[index] ? rgbToHex(modelSuggestedMixBaseColors[index]) : '');
+  const resolvedCustomMixBaseHexes = customMixBaseHexes.map((hex, index) => hex || fallbackMixBaseHexes[index] || '');
 
   const applyMergedColorState = useCallback((mergedState) => {
     setPixels(mergedState.nextPixels);
@@ -988,13 +991,14 @@ const App = () => {
     const suggestedColors = suggestIdealMixBaseColors(pixels, COLOR_MIX_BASE_COUNT);
     const result = buildColorMixAdvisorResult(pixels, layerOrder, suggestedColors);
     setSuggestedMixBaseColors(suggestedColors);
+    setCustomMixBaseHexes(Array.from({ length: COLOR_MIX_BASE_COUNT }, (_, index) => suggestedColors[index] ? rgbToHex(suggestedColors[index]) : ''));
     setColorMixAdvisorResult(result ? { ...result, modeLabel: `Suggested ${suggestedColors.length} Base Color${suggestedColors.length === 1 ? '' : 's'}` } : null);
     setStatusMessage(result ? `Suggested ${suggestedColors.length} base colors for the current model.` : 'No visible layer colors found.');
   }, [pixels, layerOrder]);
 
   const evaluateCustomMixBaseColors = useCallback(() => {
     if (!pixels) return;
-    const parsedBaseColors = customMixBaseHexes.map((hex) => hexToRgb(hex));
+    const parsedBaseColors = resolvedCustomMixBaseHexes.map((hex) => hexToRgb(hex));
     if (parsedBaseColors.some((rgb) => !rgb)) {
       setStatusMessage('Please enter 4 valid Hex colors before evaluating.');
       return;
@@ -1002,7 +1006,7 @@ const App = () => {
     const result = buildColorMixAdvisorResult(pixels, layerOrder, parsedBaseColors);
     setColorMixAdvisorResult(result ? { ...result, modeLabel: 'Custom 4-Color Evaluation' } : null);
     setStatusMessage(result ? 'Evaluated the current model against your 4 custom colors.' : 'No visible layer colors found.');
-  }, [customMixBaseHexes, pixels, layerOrder]);
+  }, [resolvedCustomMixBaseHexes, pixels, layerOrder]);
 
   const applyColorMixAdvisorResult = useCallback(() => {
     if (!pixels || !colorMixAdvisorResult) return;
@@ -1906,20 +1910,21 @@ const App = () => {
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Evaluate Custom 4 Colors</p>
-                          <p className="text-[9px] text-slate-500">Enter four Hex colors to see how the current layer colors could be mixed from them.</p>
+                          <p className="text-[9px] text-slate-500">Enter four Hex colors to see how the current layer colors could be mixed from them. Empty fields fall back to the current model suggestion.</p>
                         </div>
                         <button onClick={evaluateCustomMixBaseColors} disabled={!pixels || uniqueColorCount === 0} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Evaluate Custom 4 Colors</button>
                       </div>
                       <div className="grid gap-2">
                         {customMixBaseHexes.map((hex, index) => {
-                          const normalizedHex = normalizeHexColor(hex);
-                          const parsedRgb = hexToRgb(hex);
+                          const resolvedHex = resolvedCustomMixBaseHexes[index];
+                          const normalizedHex = normalizeHexColor(resolvedHex);
+                          const parsedRgb = hexToRgb(resolvedHex);
                           return (
                             <div key={`custom-mix-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
                               <input type="color" value={normalizedHex || '#000000'} onChange={(e) => updateCustomMixBaseHex(index, e.target.value.toUpperCase())} className="w-9 h-9 rounded-lg border border-white p-0 shrink-0 cursor-pointer" />
                               <div className="flex-1 min-w-0">
                                 <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
-                                <input type="text" value={hex} onChange={(e) => updateCustomMixBaseHex(index, e.target.value)} className="w-full text-[10px] font-bold text-slate-700 bg-transparent outline-none uppercase" placeholder="#RRGGBB" />
+                                <input type="text" value={hex} onChange={(e) => updateCustomMixBaseHex(index, e.target.value)} className="w-full text-[10px] font-bold text-slate-700 bg-transparent outline-none uppercase" placeholder={fallbackMixBaseHexes[index] || '#RRGGBB'} />
                               </div>
                               <p className="text-[8px] text-slate-500 min-w-[88px] text-right">{parsedRgb ? formatRgbLabel(parsedRgb) : 'Invalid Hex'}</p>
                             </div>
