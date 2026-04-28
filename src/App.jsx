@@ -56,6 +56,7 @@ const SIMILAR_COLOR_DISTANCE_THRESHOLD = 0.04;
 const COLOR_MIX_BASE_COUNT = 4;
 const COLOR_MIX_RATIO_STEPS = 10;
 const COLOR_MIX_GOOD_MATCH_THRESHOLD = 0.04;
+const LAYER_JUMP_HIGHLIGHT_MS = 2200;
 const LAYER_SORT_OPTIONS = [
   { value: 'current', label: 'Current Order' },
   { value: 'usage-desc', label: 'Usage Count (High to Low)' },
@@ -846,6 +847,8 @@ const App = () => {
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
   const [pendingLayerColors, setPendingLayerColors] = useState({});
+  const [jumpHighlightedLayer, setJumpHighlightedLayer] = useState(null);
+  const [canvasLayerJumpColor, setCanvasLayerJumpColor] = useState(null);
   
   const handleLayerHeightChange = (colorStr, key, delta) => setLayerHeightAdjustments(prev => {
     const current = prev[colorStr] || { plus: 0, minus: 0 };
@@ -862,6 +865,8 @@ const App = () => {
   const originalDragRef = useRef({ active: false, x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 }); const zoomRef = useRef(zoom);
   const safariGestureScaleRef = useRef(1);
+  const layerRowRefs = useRef({});
+  const layerJumpHighlightTimeoutRef = useRef(null);
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   const layerOrderRef = useRef(layerOrder); const layerHeightAdjustmentsRef = useRef(layerHeightAdjustments); const layerSmoothingSettingsRef = useRef(layerSmoothingSettings);
   
@@ -1092,6 +1097,20 @@ const App = () => {
     handleLayerColorChange(sourceKey, nextHex);
   }, [cancelPendingLayerColor, handleLayerColorChange, pendingLayerColors]);
 
+  const jumpToLayerForColor = useCallback((color) => {
+    if (!Array.isArray(color)) return;
+    const colorKey = JSON.stringify(color);
+    if (colorKey === TRANSPARENT_KEY || !layerOrderRef.current.includes(colorKey)) return;
+    setJumpHighlightedLayer(colorKey);
+    setActiveTab('layers');
+  }, []);
+
+  const handleCanvasLayerJump = useCallback(() => {
+    if (!canvasLayerJumpColor) return;
+    jumpToLayerForColor(canvasLayerJumpColor);
+    setCanvasLayerJumpColor(null);
+  }, [canvasLayerJumpColor, jumpToLayerForColor]);
+
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
       if (!prev || !prev[y] || prev[y][x] === undefined) return prev;
@@ -1103,7 +1122,15 @@ const App = () => {
         }));
         return n;
       }
-      if (tool === 'dropper') { if (isFirst) { setCurrentColor(prev[y][x]); setTool('pen'); } return prev; }
+      if (tool === 'dropper') {
+        if (isFirst) {
+          const pickedColor = prev[y][x];
+          setCurrentColor(pickedColor);
+          setTool('pen');
+          setCanvasLayerJumpColor(JSON.stringify(pickedColor) === TRANSPARENT_KEY ? null : [...pickedColor]);
+        }
+        return prev;
+      }
       const col = isTransparentMode ? [...TRANSPARENT_COLOR] : currentColor;
       if (tool === 'pen') {
         const n = [...prev]; const r = (brushSize - 1) / 2; let ch = false;
@@ -1394,7 +1421,23 @@ const App = () => {
     };
   }, [activeTab, applyAnchoredZoom, pixels]);
 
-  const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; resetPinchZoom(); };
+  useEffect(() => {
+    if (activeTab !== 'layers' || !jumpHighlightedLayer) return;
+    const row = layerRowRefs.current[jumpHighlightedLayer];
+    if (!row) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (layerJumpHighlightTimeoutRef.current) clearTimeout(layerJumpHighlightTimeoutRef.current);
+    layerJumpHighlightTimeoutRef.current = setTimeout(() => {
+      setJumpHighlightedLayer(current => current === jumpHighlightedLayer ? null : current);
+      layerJumpHighlightTimeoutRef.current = null;
+    }, LAYER_JUMP_HIGHLIGHT_MS);
+  }, [activeTab, jumpHighlightedLayer, layerOrder]);
+
+  useEffect(() => () => {
+    if (layerJumpHighlightTimeoutRef.current) clearTimeout(layerJumpHighlightTimeoutRef.current);
+  }, []);
+
+  const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select' && tool !== 'dropper') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; resetPinchZoom(); };
   const startOriginalImageDrag = (e) => {
     const container = originalImageContainerRef.current;
     if (!container) return;
@@ -1654,6 +1697,7 @@ const App = () => {
 
   const selected3DLayerIndex = selected3DLayer ? (is3DLayerMoveMode ? draft3DLayerOrder.indexOf(selected3DLayer) : layerOrder.indexOf(selected3DLayer)) : -1;
   const selected3DLayerColor = selected3DLayerIndex >= 0 ? JSON.parse(selected3DLayer) : null;
+  const canShowCanvasLayerJump = canvasLayerJumpColor && layerOrder.includes(JSON.stringify(canvasLayerJumpColor));
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
@@ -1745,7 +1789,20 @@ const App = () => {
                     </div>
                   )}
                 </div>
-                {pixels && !useVirtualPad && (<button onClick={() => setIsCanvasLocked(!isCanvasLocked)} className={`absolute top-4 right-4 z-50 p-2.5 rounded-xl transition-all shadow-lg border ${isCanvasLocked ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white/50 backdrop-blur-md text-slate-700 border-white/20'}`}>{isCanvasLocked ? <Lock size={16} /> : <Unlock size={16} />}</button>)}
+                {pixels && !useVirtualPad && (
+                  <div className="absolute top-4 right-4 z-50 flex flex-col items-end gap-2">
+                    {canShowCanvasLayerJump && (
+                      <button
+                        onClick={handleCanvasLayerJump}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/90 backdrop-blur-md text-slate-700 border border-white/30 shadow-lg active:scale-95 transition"
+                      >
+                        <div className="w-4 h-4 rounded-full border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(canvasLayerJumpColor) }} />
+                        <span className="text-[9px] font-black uppercase tracking-widest">Go to Layer</span>
+                      </button>
+                    )}
+                    <button onClick={() => setIsCanvasLocked(!isCanvasLocked)} className={`p-2.5 rounded-xl transition-all shadow-lg border ${isCanvasLocked ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white/50 backdrop-blur-md text-slate-700 border-white/20'}`}>{isCanvasLocked ? <Lock size={16} /> : <Unlock size={16} />}</button>
+                  </div>
+                )}
                 {showOriginal && sourceImage && (
                   <div ref={originalImageContainerRef} className="flex-1 relative overflow-auto bg-slate-100/50 border-t border-slate-100 custom-scrollbar text-center cursor-grab active:cursor-grabbing" style={{ touchAction: 'none' }} onMouseDown={startOriginalImageDrag} onMouseMove={moveOriginalImageDrag} onMouseUp={stopOriginalImageDrag} onMouseLeave={stopOriginalImageDrag} onTouchStart={startOriginalImageDrag} onTouchMove={moveOriginalImageDrag} onTouchEnd={stopOriginalImageDrag}>
                     <div className="p-8 min-h-full min-w-full flex items-center justify-center"><img src={sourceImage} style={{ width: `${Math.max(1, 100 * pipZoom)}%`, height: 'auto', maxWidth: 'none' }} className="pointer-events-none shadow-2xl rounded-lg" alt="Reference" /></div>
@@ -1816,7 +1873,18 @@ const App = () => {
                       const zMinus = typeof adj === 'number' ? 0 : (adj.minus || 0);
                       
                       return (
-                        <div key={cs} className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-white hover:shadow-md transition-all">
+                        <div
+                          key={cs}
+                          ref={(node) => {
+                            if (node) layerRowRefs.current[cs] = node;
+                            else delete layerRowRefs.current[cs];
+                          }}
+                          className={`flex flex-col gap-2 p-3 border rounded-xl transition-all ${
+                            jumpHighlightedLayer === cs
+                              ? 'bg-indigo-50 border-indigo-300 ring-2 ring-indigo-200 shadow-md'
+                              : 'bg-slate-50 border-slate-100 hover:bg-white hover:shadow-md'
+                          }`}
+                        >
                           <div className="flex items-center gap-3">
                             <div className="flex flex-col gap-0.5 shrink-0"><button onClick={() => moveLayer(i, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronUp size={12} /></button><button onClick={() => moveLayer(i, 1)} disabled={i === layerOrder.length - 1} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronDown size={12} /></button></div>
                             <input
