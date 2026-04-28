@@ -845,6 +845,7 @@ const App = () => {
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
+  const [pendingLayerColors, setPendingLayerColors] = useState({});
   
   const handleLayerHeightChange = (colorStr, key, delta) => setLayerHeightAdjustments(prev => {
     const current = prev[colorStr] || { plus: 0, minus: 0 };
@@ -863,7 +864,6 @@ const App = () => {
   const safariGestureScaleRef = useRef(1);
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   const layerOrderRef = useRef(layerOrder); const layerHeightAdjustmentsRef = useRef(layerHeightAdjustments); const layerSmoothingSettingsRef = useRef(layerSmoothingSettings);
-  const layerColorInputRefs = useRef({});
   
   useEffect(() => { pixelsRef.current = pixels; }, [pixels]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
@@ -1070,15 +1070,27 @@ const App = () => {
     setStatusMessage(nextState.merged ? 'Layer color updated and merged into an existing layer.' : 'Layer color updated.');
   }, [currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
 
-  const openLayerColorPicker = useCallback((sourceKey) => {
-    const input = layerColorInputRefs.current[sourceKey];
-    if (!input) return;
-    if (typeof input.showPicker === 'function') {
-      input.showPicker();
-      return;
-    }
-    input.click();
+  const updatePendingLayerColor = useCallback((sourceKey, nextHex) => {
+    const normalizedHex = normalizeHexColor(nextHex);
+    if (!normalizedHex) return;
+    setPendingLayerColors((prev) => ({ ...prev, [sourceKey]: normalizedHex.toUpperCase() }));
   }, []);
+
+  const cancelPendingLayerColor = useCallback((sourceKey) => {
+    setPendingLayerColors((prev) => {
+      if (!(sourceKey in prev)) return prev;
+      const next = { ...prev };
+      delete next[sourceKey];
+      return next;
+    });
+  }, []);
+
+  const applyPendingLayerColor = useCallback((sourceKey) => {
+    const nextHex = pendingLayerColors[sourceKey];
+    cancelPendingLayerColor(sourceKey);
+    if (!nextHex) return;
+    handleLayerColorChange(sourceKey, nextHex);
+  }, [cancelPendingLayerColor, handleLayerColorChange, pendingLayerColors]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -1795,6 +1807,9 @@ const App = () => {
                   return layerOrder.length === 0 ? <p className="text-center text-[10px] text-slate-300 mt-10 font-black tracking-widest uppercase">No Data</p> : 
                     layerOrder.map((cs, i) => {
                       const col = JSON.parse(cs); 
+                      const currentLayerHex = rgbToHex(col);
+                      const pendingLayerHex = pendingLayerColors[cs] || currentLayerHex;
+                      const hasPendingLayerColor = pendingLayerHex !== currentLayerHex;
                       const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 };
                       const adj = layerHeightAdjustments[cs] || { plus: 0, minus: 0 };
                       const zPlus = typeof adj === 'number' ? adj : (adj.plus || 0);
@@ -1804,30 +1819,24 @@ const App = () => {
                         <div key={cs} className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-white hover:shadow-md transition-all">
                           <div className="flex items-center gap-3">
                             <div className="flex flex-col gap-0.5 shrink-0"><button onClick={() => moveLayer(i, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronUp size={12} /></button><button onClick={() => moveLayer(i, 1)} disabled={i === layerOrder.length - 1} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronDown size={12} /></button></div>
-                            <div className="relative shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => openLayerColorPicker(cs)}
-                                className="w-8 h-8 rounded-lg shadow-inner border border-white overflow-hidden cursor-pointer active:scale-95 transition"
-                                style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }}
-                                aria-label={`Edit layer ${i + 1} color`}
-                              />
-                              <input
-                                ref={(element) => {
-                                  if (element) layerColorInputRefs.current[cs] = element;
-                                  else delete layerColorInputRefs.current[cs];
-                                }}
-                                type="color"
-                                value={rgbToHex(col)}
-                                onChange={(e) => handleLayerColorChange(cs, e.target.value.toUpperCase())}
-                                tabIndex={-1}
-                                aria-hidden="true"
-                                className="absolute inset-0 opacity-0 pointer-events-none"
-                              />
-                            </div>
+                            <input
+                              type="color"
+                              value={pendingLayerHex}
+                              onChange={(e) => updatePendingLayerColor(cs, e.target.value)}
+                              aria-label={`Edit layer ${i + 1} color`}
+                              className="w-8 h-8 rounded-lg shadow-inner border border-white shrink-0 cursor-pointer overflow-hidden bg-transparent active:scale-95 transition"
+                            />
                             <div className="flex-1 min-w-0">
                               <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p>
-                              <p className="text-[10px] font-bold text-slate-700">{rgbToHex(col)}</p>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <p className="text-[10px] font-bold text-slate-700">{pendingLayerHex}</p>
+                                {hasPendingLayerColor && (
+                                  <div className="flex items-center gap-1">
+                                    <button onClick={() => applyPendingLayerColor(cs)} className="px-2 py-0.5 rounded-md bg-indigo-600 text-white text-[8px] font-black uppercase tracking-widest active:scale-95 transition">Apply</button>
+                                    <button onClick={() => cancelPendingLayerColor(cs)} className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-500 text-[8px] font-black uppercase tracking-widest active:scale-95 transition">Cancel</button>
+                                  </div>
+                                )}
+                              </div>
                               <p className="text-[10px] font-bold text-slate-700">Top: <span className="text-indigo-600">{(baseThickness + chs[i]).toFixed(1)}mm</span></p>
                             </div>
                             <div className="flex flex-col gap-1 shrink-0">
