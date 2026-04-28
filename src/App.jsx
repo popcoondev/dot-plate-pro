@@ -49,7 +49,7 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 
 // --- 定数 ---
 const MAX_UNDO = 15;
-const MIN_RESOLUTION = 8;
+const MIN_CANVAS_SIZE = 1;
 const MAX_RESOLUTION = 500;
 const DEFAULT_TARGET_COLOR_COUNT = 8;
 const SIMILAR_COLOR_DISTANCE_THRESHOLD = 0.04;
@@ -808,6 +808,84 @@ const getFormattedDate = (format = "compact") => {
   return `${y}${m}${d}${h}${min}${s}`;
 };
 
+const getFilledPixelBounds = (pixels) => {
+  if (!pixels) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  pixels.forEach((row, y) => row.forEach((pixel, x) => {
+    if (!Array.isArray(pixel) || JSON.stringify(pixel) === TRANSPARENT_KEY) return;
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }));
+
+  if (!Number.isFinite(minX)) return null;
+
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const radiusX = Math.max(centerX - minX, maxX - centerX);
+  const radiusY = Math.max(centerY - minY, maxY - centerY);
+
+  return {
+    minX,
+    maxX,
+    minY,
+    maxY,
+    centerX,
+    centerY,
+    radiusX,
+    radiusY,
+    maxRadius: Math.max(radiusX, radiusY),
+  };
+};
+
+const createSquarePixels = (size) => Array.from({ length: size }, () => Array.from({ length: size }, () => [...TRANSPARENT_COLOR]));
+
+const resizeSquarePixels = (pixels, nextSize) => {
+  const nextPixels = createSquarePixels(nextSize);
+  if (!pixels) return { nextPixels, discardedFilledCount: 0 };
+
+  let discardedFilledCount = 0;
+  pixels.forEach((row, y) => row.forEach((pixel, x) => {
+    if (x < nextSize && y < nextSize) {
+      nextPixels[y][x] = [...pixel];
+      return;
+    }
+    if (JSON.stringify(pixel) !== TRANSPARENT_KEY) discardedFilledCount += 1;
+  }));
+
+  return { nextPixels, discardedFilledCount };
+};
+
+const trimPixelsToSquare = (pixels, padding = 0) => {
+  const bounds = getFilledPixelBounds(pixels);
+  if (!bounds) return null;
+
+  const safePadding = Math.max(0, Number.parseInt(padding, 10) || 0);
+  const contentWidth = bounds.maxX - bounds.minX + 1;
+  const contentHeight = bounds.maxY - bounds.minY + 1;
+  const nextSize = Math.max(contentWidth, contentHeight) + safePadding * 2;
+  const nextPixels = createSquarePixels(nextSize);
+  const offsetX = Math.floor((nextSize - contentWidth) / 2);
+  const offsetY = Math.floor((nextSize - contentHeight) / 2);
+
+  for (let y = bounds.minY; y <= bounds.maxY; y += 1) {
+    for (let x = bounds.minX; x <= bounds.maxX; x += 1) {
+      nextPixels[y - bounds.minY + offsetY][x - bounds.minX + offsetX] = [...pixels[y][x]];
+    }
+  }
+
+  return { nextPixels, nextSize, padding: safePadding };
+};
+
+const blurActiveElement = () => {
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+};
+
 const NavItem = ({ id, icon: Icon, label, isActive, onClick }) => (
   <button onClick={() => onClick(id)} className={`flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all rounded-lg ${isActive ? 'text-indigo-600 bg-indigo-50' : 'text-slate-400'}`}>
     <Icon size={18} strokeWidth={isActive ? 2.5 : 2} />
@@ -833,11 +911,14 @@ const App = () => {
   const [selection, setSelection] = useState(null); const [clipboard, setClipboard] = useState(null);
   const [layerOrder, setLayerOrder] = useState([]); const [layerHeightAdjustments, setLayerHeightAdjustments] = useState({});
   const [layerSmoothingSettings, setLayerSmoothingSettings] = useState({});
-  const [showConfirmModal, setShowConfirmModal] = useState(false); const [isExporting, setIsExporting] = useState(false); 
+  const [showConfirmModal, setShowConfirmModal] = useState(false); const [showCanvasAdjustModal, setShowCanvasAdjustModal] = useState(false); const [isExporting, setIsExporting] = useState(false); 
   const [statusMessage, setStatusMessage] = useState(""); const [showSampleOffsetControls, setShowSampleOffsetControls] = useState(false);
   const [sampleOffsetX, setSampleOffsetX] = useState(0); const [sampleOffsetY, setSampleOffsetY] = useState(0);
   const [isResolutionToolbarVisible, setIsResolutionToolbarVisible] = useState(true);
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
+  const [canvasAdjustSizeInput, setCanvasAdjustSizeInput] = useState('32');
+  const [canvasAdjustPaddingInput, setCanvasAdjustPaddingInput] = useState('2');
+  const [pendingCanvasResize, setPendingCanvasResize] = useState(null);
   const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
   const [layerSortMode, setLayerSortMode] = useState('current');
   const [suggestedMixBaseColors, setSuggestedMixBaseColors] = useState([]);
@@ -869,6 +950,7 @@ const App = () => {
   const layerJumpHighlightTimeoutRef = useRef(null);
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   const layerOrderRef = useRef(layerOrder); const layerHeightAdjustmentsRef = useRef(layerHeightAdjustments); const layerSmoothingSettingsRef = useRef(layerSmoothingSettings);
+  const suppressSourceReprocessRef = useRef(false);
   
   useEffect(() => { pixelsRef.current = pixels; }, [pixels]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
@@ -930,6 +1012,20 @@ const App = () => {
         return { stack: n, step: n.length - 1 };
     });
   }, [createHistorySnapshot]);
+
+  const applySquareCanvasChange = useCallback((nextPixels, nextGridSize, status) => {
+    setPixels(nextPixels);
+    setGridSize(nextGridSize);
+    syncLayersFromPixels(nextPixels);
+    setLayerSortMode('current');
+    setCanvasLayerJumpColor(null);
+    setPendingCanvasResize(null);
+    pushToHistory(nextPixels);
+    if (status) setStatusMessage(status);
+    const nextCursor = { x: Math.min(Math.max(0, cursorPos.x), Math.max(0, nextGridSize - 1)), y: Math.min(Math.max(0, cursorPos.y), Math.max(0, nextGridSize - 1)) };
+    setCursorPos(nextCursor);
+    cursorSubPixelRef.current = { ...nextCursor };
+  }, [cursorPos.x, cursorPos.y, pushToHistory, syncLayersFromPixels]);
 
   const undo = useCallback(() => setHistory(prev => {
     if (prev.step > 0) { const p = JSON.parse(prev.stack[prev.step - 1]); restoreHistorySnapshot(p); return { ...prev, step: prev.step - 1 }; }
@@ -1269,6 +1365,47 @@ const App = () => {
     r.readAsText(f); e.target.value = '';
   }, [centerCanvas, createHistorySnapshot]);
 
+  const openCanvasAdjustModal = useCallback(() => {
+    setCanvasAdjustSizeInput(`${gridSize}`);
+    setPendingCanvasResize(null);
+    setShowCanvasAdjustModal(true);
+  }, [gridSize]);
+
+  const requestSquareCanvasResize = useCallback((force = false) => {
+    if (!pixels) return;
+    blurActiveElement();
+    const nextSize = Math.min(MAX_RESOLUTION, Math.max(MIN_CANVAS_SIZE, Number.parseInt(canvasAdjustSizeInput, 10) || gridSize));
+    if (nextSize === gridSize) {
+      setShowCanvasAdjustModal(false);
+      return;
+    }
+    const resized = resizeSquarePixels(pixels, nextSize);
+    if (!force && resized.discardedFilledCount > 0) {
+      setPendingCanvasResize({ nextSize, discardedFilledCount: resized.discardedFilledCount, nextPixels: resized.nextPixels });
+      return;
+    }
+    suppressSourceReprocessRef.current = true;
+    applySquareCanvasChange(resized.nextPixels, nextSize, `Canvas resized to ${nextSize} x ${nextSize}.`);
+    setShowCanvasAdjustModal(false);
+  }, [applySquareCanvasChange, canvasAdjustSizeInput, gridSize, pixels]);
+
+  const trimCanvasToSquare = useCallback((padding = 0) => {
+    if (!pixels) return;
+    blurActiveElement();
+    const trimmed = trimPixelsToSquare(pixels, padding);
+    if (!trimmed) {
+      setStatusMessage('No visible dots found to trim.');
+      return;
+    }
+    suppressSourceReprocessRef.current = true;
+    applySquareCanvasChange(
+      trimmed.nextPixels,
+      trimmed.nextSize,
+      trimmed.padding > 0 ? `Canvas trimmed to a square with ${trimmed.padding} cell padding.` : 'Canvas trimmed to the smallest square fit.'
+    );
+    setShowCanvasAdjustModal(false);
+  }, [applySquareCanvasChange, pixels]);
+
   const exportSTL = () => {
     if (!sceneRef.current) return; const ex = new STLExporter();
     const b = new Blob([ex.parse(sceneRef.current, { binary: true })], { type: 'application/octet-stream' });
@@ -1541,13 +1678,12 @@ const App = () => {
 
   useEffect(() => {
     if (isLoadingRef.current) return;
-    if (sourceImage) reprocessImage(sourceImage, gridSize, sampleOffsetX, sampleOffsetY);
-    else if (pixels) {
-      const oh = pixels.length; const ow = pixels[0]?.length || 0; const ngs = parseInt(gridSize, 10);
-      if (oh === ngs && ow === ngs) return;
-      const n = Array.from({ length: ngs }, (_, y) => Array.from({ length: ngs }, (_, x) => (y < oh && x < ow) ? pixels[y][x] : [...TRANSPARENT_COLOR]));
-      setPixels(n);
+    if (!sourceImage) return;
+    if (suppressSourceReprocessRef.current) {
+      suppressSourceReprocessRef.current = false;
+      return;
     }
+    reprocessImage(sourceImage, gridSize, sampleOffsetX, sampleOffsetY);
   }, [gridSize, sampleOffsetX, sampleOffsetY, sourceImage, reprocessImage]);
 
   useEffect(() => {
@@ -1722,6 +1858,68 @@ const App = () => {
           </div>
         </div>
       )}
+      {showCanvasAdjustModal && (
+        <div className="fixed inset-0 z-[105] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm">
+          <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in">
+            <div className="p-6 border-b border-slate-100">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[9px] font-black text-indigo-500 uppercase tracking-widest">Canvas Adjust</p>
+                  <h3 className="text-lg font-black text-slate-800 mt-1">Square Canvas Tools</h3>
+                  <p className="text-[10px] text-slate-500 mt-1">Keep the square canvas model intact while resizing or trimming the drawing area.</p>
+                </div>
+                <button onClick={() => { setPendingCanvasResize(null); setShowCanvasAdjustModal(false); }} className="p-2 rounded-xl bg-slate-50 text-slate-400 hover:text-slate-600 transition"><CloseIcon size={16} /></button>
+              </div>
+            </div>
+            <div className="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+              <div className="rounded-[1.25rem] border border-slate-100 bg-slate-50 p-4 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Resize Square Canvas</p>
+                    <p className="text-[9px] text-slate-500">Change the square working area while keeping visible dots at the same coordinates.</p>
+                  </div>
+                  <div className="rounded-xl bg-white border border-slate-100 px-3 py-2 text-right">
+                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Current</p>
+                    <p className="text-sm font-black text-slate-800">{gridSize} x {gridSize}</p>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">New Grid Size</label>
+                  <input type="number" min={MIN_CANVAS_SIZE} max={MAX_RESOLUTION} value={canvasAdjustSizeInput} onChange={(e) => { setCanvasAdjustSizeInput(e.target.value); setPendingCanvasResize(null); }} className="w-full text-base sm:text-sm p-2.5 rounded-xl border border-slate-200 bg-white outline-none focus:border-indigo-400 transition" />
+                </div>
+                {pendingCanvasResize && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                    <p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Warning</p>
+                    <p className="text-[10px] text-amber-700 mt-1">{pendingCanvasResize.discardedFilledCount} visible dot{pendingCanvasResize.discardedFilledCount === 1 ? '' : 's'} will be removed outside the new square bounds.</p>
+                  </div>
+                )}
+                <div className="flex justify-end gap-2">
+                  {pendingCanvasResize ? (
+                    <button onClick={() => requestSquareCanvasResize(true)} className="px-4 py-2 rounded-xl bg-amber-600 text-white text-[9px] font-black shadow-lg uppercase tracking-widest hover:bg-amber-700 transition">Resize Anyway</button>
+                  ) : (
+                    <button onClick={() => requestSquareCanvasResize(false)} disabled={!pixels} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-[9px] font-black shadow-lg uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Apply Resize</button>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-[1.25rem] border border-slate-100 bg-slate-50 p-4 space-y-4">
+                <div>
+                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Trim Visible Dots</p>
+                  <p className="text-[9px] text-slate-500">Rebuild the current drawing into the smallest square that fits the visible dots, with optional square padding.</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button onClick={() => trimCanvasToSquare(0)} disabled={!pixels} className="px-4 py-2 rounded-xl bg-slate-900 text-white text-[9px] font-black shadow-lg uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Trim To Square Fit</button>
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
+                    <label className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Padding</label>
+                    <input type="number" min="0" max={MAX_RESOLUTION} value={canvasAdjustPaddingInput} onChange={(e) => setCanvasAdjustPaddingInput(e.target.value)} className="w-14 text-base sm:text-sm bg-transparent outline-none text-slate-700" />
+                  </div>
+                  <button onClick={() => trimCanvasToSquare(Math.max(0, Number.parseInt(canvasAdjustPaddingInput, 10) || 0))} disabled={!pixels} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-[9px] font-black shadow-lg uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Trim With Square Padding</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       {isExporting && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-white/60 backdrop-blur-xl">
           <div className="text-center">
@@ -1735,11 +1933,12 @@ const App = () => {
           {activeTab === 'editor' && (
             <div className="h-full flex flex-col relative">
               <div className="px-4 py-3 border-b border-slate-50 shrink-0">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Resolution</span><span className="bg-indigo-600 text-white px-2 py-0.5 rounded-lg text-[10px] font-black min-w-[30px] text-center shadow-sm">{gridSize}</span></div>
-                  <div className="flex items-center gap-1.5">
+                <div className="flex flex-col gap-3 mb-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-2 shrink-0"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Resolution</span><span className="bg-indigo-600 text-white px-2 py-0.5 rounded-lg text-[10px] font-black min-w-[64px] text-center shadow-sm">{gridSize} x {gridSize}</span></div>
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
                     <button onClick={() => setUseVirtualPad(!useVirtualPad)} className={`p-1.5 rounded-lg transition shadow-sm border ${useVirtualPad ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><Gamepad size={14}/></button>
                     <button onClick={() => setShowConfirmModal(true)} className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm active:scale-90 transition"><FilePlus size={14}/></button>
+                    <button onClick={openCanvasAdjustModal} disabled={!pixels} className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm active:scale-90 transition disabled:opacity-30 disabled:cursor-not-allowed"><Maximize2 size={14}/></button>
                     <label className="p-1.5 rounded-lg bg-white border border-slate-100 text-slate-400 shadow-sm cursor-pointer active:scale-90 transition"><ImagePlus size={14}/><input type="file" accept="image/*" className="hidden" onChange={e => e.target.files[0] && handleUpload(e.target.files[0])} /></label>
                     <button onClick={() => setShowOriginal(!showOriginal)} disabled={!sourceImage} className={`p-1.5 rounded-lg border transition shadow-sm ${showOriginal ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><ImageIcon size={14}/></button>
                     <button onClick={() => setShowGrid(!showGrid)} className={`p-1.5 rounded-lg border transition shadow-sm ${showGrid ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-slate-100 text-slate-400'}`}><Grid size={14}/></button>
@@ -1751,8 +1950,8 @@ const App = () => {
                 {isResolutionToolbarVisible && (
                   <>
                     <div className="w-full px-1 flex items-center gap-2">
-                      <button onClick={() => setGridSize(prev => Math.max(MIN_RESOLUTION, prev - 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Minus size={14} /></button>
-                      <input type="range" min={MIN_RESOLUTION} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
+                      <button onClick={() => setGridSize(prev => Math.max(MIN_CANVAS_SIZE, prev - 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Minus size={14} /></button>
+                      <input type="range" min={MIN_CANVAS_SIZE} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
                       <button onClick={() => setGridSize(prev => Math.min(MAX_RESOLUTION, prev + 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Plus size={14} /></button>
                     </div>
                     {sourceImage && showSampleOffsetControls && (
