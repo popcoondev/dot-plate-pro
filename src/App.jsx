@@ -53,6 +53,9 @@ const MIN_RESOLUTION = 8;
 const MAX_RESOLUTION = 500;
 const DEFAULT_TARGET_COLOR_COUNT = 8;
 const SIMILAR_COLOR_DISTANCE_THRESHOLD = 0.04;
+const COLOR_MIX_BASE_COUNT = 4;
+const COLOR_MIX_RATIO_STEPS = 10;
+const COLOR_MIX_GOOD_MATCH_THRESHOLD = 0.04;
 const LAYER_SORT_OPTIONS = [
   { value: 'current', label: 'Current Order' },
   { value: 'usage-desc', label: 'Usage Count (High to Low)' },
@@ -68,6 +71,12 @@ const TRANSPARENT_KEY = JSON.stringify(TRANSPARENT_COLOR);
 const srgbToLinear = (channel) => {
   const normalized = channel / 255;
   return normalized <= 0.04045 ? normalized / 12.92 : Math.pow((normalized + 0.055) / 1.055, 2.4);
+};
+
+const linearToSrgb = (channel) => {
+  const clamped = Math.max(0, Math.min(1, channel));
+  const srgb = clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
+  return Math.round(Math.max(0, Math.min(1, srgb)) * 255);
 };
 
 const rgbToOklab = (rgb) => {
@@ -87,6 +96,221 @@ const rgbToOklab = (rgb) => {
 };
 
 const getOklabDistance = (left, right) => Math.hypot(left.l - right.l, left.a - right.a, left.b - right.b);
+
+const oklabToRgb = (oklab) => {
+  const l = oklab.l + 0.3963377774 * oklab.a + 0.2158037573 * oklab.b;
+  const m = oklab.l - 0.1055613458 * oklab.a - 0.0638541728 * oklab.b;
+  const s = oklab.l - 0.0894841775 * oklab.a - 1.2914855480 * oklab.b;
+
+  const l3 = l * l * l;
+  const m3 = m * m * m;
+  const s3 = s * s * s;
+
+  return [
+    linearToSrgb(4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3),
+    linearToSrgb(-1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3),
+    linearToSrgb(-0.0041960863 * l3 - 0.7034186147 * m3 + 1.7076147010 * s3),
+  ];
+};
+
+const rgbToHex = (rgb) => `#${rgb.map((channel) => Math.max(0, Math.min(255, channel)).toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+
+const normalizeHexColor = (value) => {
+  const raw = `${value || ''}`.trim().replace(/^#/, '');
+  if (/^[0-9a-fA-F]{3}$/.test(raw)) return `#${raw.split('').map((char) => char + char).join('').toUpperCase()}`;
+  if (/^[0-9a-fA-F]{6}$/.test(raw)) return `#${raw.toUpperCase()}`;
+  return null;
+};
+
+const hexToRgb = (value) => {
+  const normalized = normalizeHexColor(value);
+  if (!normalized) return null;
+  return [1, 3, 5].map((index) => parseInt(normalized.slice(index, index + 2), 16));
+};
+
+const getLinearRgb = (rgb) => rgb.map((channel) => srgbToLinear(channel));
+
+const mixLinearRgb = (colors, weights) => {
+  const mixed = [0, 0, 0];
+  colors.forEach((color, index) => {
+    mixed[0] += color[0] * weights[index];
+    mixed[1] += color[1] * weights[index];
+    mixed[2] += color[2] * weights[index];
+  });
+  return mixed;
+};
+
+const formatRgbLabel = (rgb) => `RGB(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+
+const formatMixRecipe = (components) => components.map(({ index, ratio }) => `Base ${index + 1} ${Math.round(ratio * 100)}%`).join(' + ');
+
+const dedupeRgbList = (colors) => {
+  const unique = [];
+  const seen = new Set();
+  colors.forEach((rgb) => {
+    const hex = rgbToHex(rgb);
+    if (seen.has(hex)) return;
+    seen.add(hex);
+    unique.push(rgb);
+  });
+  return unique;
+};
+
+const suggestIdealMixBaseColors = (pixels, targetCount = COLOR_MIX_BASE_COUNT) => {
+  if (!pixels) return [];
+  const entries = Array.from(collectUniqueColorStats(pixels).values()).map((info) => ({
+    rgb: info.color,
+    weight: info.count,
+    oklab: rgbToOklab(info.color),
+  })).sort((left, right) => right.weight - left.weight);
+
+  if (entries.length === 0) return [];
+  if (entries.length <= targetCount) return entries.map((entry) => entry.rgb);
+
+  let centroids = entries.slice(0, targetCount).map((entry) => ({ ...entry.oklab }));
+  let clusterWeights = centroids.map(() => 0);
+
+  for (let iteration = 0; iteration < 8; iteration++) {
+    const accumulators = centroids.map(() => ({ weight: 0, l: 0, a: 0, b: 0 }));
+
+    entries.forEach((entry) => {
+      let bestIndex = 0;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      centroids.forEach((centroid, index) => {
+        const distance = getOklabDistance(entry.oklab, centroid);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = index;
+        }
+      });
+
+      const bucket = accumulators[bestIndex];
+      bucket.weight += entry.weight;
+      bucket.l += entry.oklab.l * entry.weight;
+      bucket.a += entry.oklab.a * entry.weight;
+      bucket.b += entry.oklab.b * entry.weight;
+    });
+
+    centroids = centroids.map((centroid, index) => {
+      const bucket = accumulators[index];
+      if (bucket.weight === 0) return centroid;
+      return {
+        l: bucket.l / bucket.weight,
+        a: bucket.a / bucket.weight,
+        b: bucket.b / bucket.weight,
+      };
+    });
+    clusterWeights = accumulators.map((bucket) => bucket.weight);
+  }
+
+  const suggested = centroids
+    .map((centroid, index) => ({ rgb: oklabToRgb(centroid), weight: clusterWeights[index] || 0 }))
+    .sort((left, right) => right.weight - left.weight)
+    .map((entry) => entry.rgb);
+
+  const deduped = dedupeRgbList(suggested);
+  if (deduped.length >= targetCount) return deduped.slice(0, targetCount);
+
+  const supplements = entries.map((entry) => entry.rgb).filter((rgb) => !deduped.some((candidate) => rgbToHex(candidate) === rgbToHex(rgb)));
+  return [...deduped, ...supplements].slice(0, targetCount);
+};
+
+const buildMixCandidates = (baseColors) => {
+  const linearBaseColors = baseColors.map((rgb) => getLinearRgb(rgb));
+  const candidates = [];
+
+  const pushCandidate = (components) => {
+    const colors = components.map(({ index }) => linearBaseColors[index]);
+    const weights = components.map(({ ratio }) => ratio);
+    const linearRgb = mixLinearRgb(colors, weights);
+    const mixedRgb = linearRgb.map((channel) => linearToSrgb(channel));
+    candidates.push({
+      components,
+      mixedRgb,
+      mixedOklab: rgbToOklab(mixedRgb),
+      recipeLabel: formatMixRecipe(components),
+    });
+  };
+
+  baseColors.forEach((_, index) => pushCandidate([{ index, ratio: 1 }]));
+
+  for (let left = 0; left < baseColors.length; left++) {
+    for (let right = left + 1; right < baseColors.length; right++) {
+      for (let step = 1; step < COLOR_MIX_RATIO_STEPS; step++) {
+        pushCandidate([
+          { index: left, ratio: step / COLOR_MIX_RATIO_STEPS },
+          { index: right, ratio: (COLOR_MIX_RATIO_STEPS - step) / COLOR_MIX_RATIO_STEPS },
+        ]);
+      }
+    }
+  }
+
+  for (let first = 0; first < baseColors.length; first++) {
+    for (let second = first + 1; second < baseColors.length; second++) {
+      for (let third = second + 1; third < baseColors.length; third++) {
+        for (let left = 1; left < COLOR_MIX_RATIO_STEPS - 1; left++) {
+          for (let middle = 1; middle < COLOR_MIX_RATIO_STEPS - left; middle++) {
+            const right = COLOR_MIX_RATIO_STEPS - left - middle;
+            if (right < 1) continue;
+            pushCandidate([
+              { index: first, ratio: left / COLOR_MIX_RATIO_STEPS },
+              { index: second, ratio: middle / COLOR_MIX_RATIO_STEPS },
+              { index: third, ratio: right / COLOR_MIX_RATIO_STEPS },
+            ]);
+          }
+        }
+      }
+    }
+  }
+
+  return candidates;
+};
+
+const buildColorMixAdvisorResult = (pixels, layerOrder, baseColors) => {
+  if (!pixels || baseColors.length === 0) return null;
+  const colorStats = collectUniqueColorStats(pixels);
+  const candidates = buildMixCandidates(baseColors);
+  if (candidates.length === 0) return null;
+
+  const layers = layerOrder.filter((key) => colorStats.has(key)).map((key, index) => {
+    const { color, count } = colorStats.get(key);
+    const targetOklab = rgbToOklab(color);
+    let bestCandidate = null;
+    let bestError = Number.POSITIVE_INFINITY;
+
+    candidates.forEach((candidate) => {
+      const error = getOklabDistance(targetOklab, candidate.mixedOklab);
+      if (error < bestError) {
+        bestError = error;
+        bestCandidate = candidate;
+      }
+    });
+
+    return {
+      key,
+      layerNumber: index + 1,
+      targetRgb: color,
+      usageCount: count,
+      recipeLabel: bestCandidate.recipeLabel,
+      mixedRgb: bestCandidate.mixedRgb,
+      error: bestError,
+    };
+  });
+
+  if (layers.length === 0) return null;
+
+  const errors = layers.map((layer) => layer.error);
+  return {
+    baseColors,
+    layers,
+    summary: {
+      layerCount: layers.length,
+      maxError: Math.max(...errors),
+      averageError: errors.reduce((sum, value) => sum + value, 0) / errors.length,
+      withinThresholdCount: layers.filter((layer) => layer.error <= COLOR_MIX_GOOD_MATCH_THRESHOLD).length,
+    },
+  };
+};
 
 const rgbToHslLike = (rgb) => {
   const r = rgb[0] / 255;
@@ -543,6 +767,9 @@ const App = () => {
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
   const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
   const [layerSortMode, setLayerSortMode] = useState('current');
+  const [suggestedMixBaseColors, setSuggestedMixBaseColors] = useState([]);
+  const [customMixBaseHexes, setCustomMixBaseHexes] = useState(['#FF0000', '#00FF00', '#0000FF', '#FFFFFF']);
+  const [colorMixAdvisorResult, setColorMixAdvisorResult] = useState(null);
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
@@ -678,6 +905,31 @@ const App = () => {
     }
     applyMergedColorState(reducedState);
   }, [pixels, targetColorCount, uniqueColorCount, layerOrder, layerHeightAdjustments, layerSmoothingSettings, applyMergedColorState]);
+
+  const updateCustomMixBaseHex = useCallback((index, value) => {
+    setCustomMixBaseHexes((prev) => prev.map((hex, hexIndex) => hexIndex === index ? value : hex));
+  }, []);
+
+  const suggestColorMixAdvisor = useCallback(() => {
+    if (!pixels) return;
+    const suggestedColors = suggestIdealMixBaseColors(pixels, COLOR_MIX_BASE_COUNT);
+    const result = buildColorMixAdvisorResult(pixels, layerOrder, suggestedColors);
+    setSuggestedMixBaseColors(suggestedColors);
+    setColorMixAdvisorResult(result ? { ...result, modeLabel: `Suggested ${suggestedColors.length} Base Color${suggestedColors.length === 1 ? '' : 's'}` } : null);
+    setStatusMessage(result ? `Suggested ${suggestedColors.length} base colors for the current model.` : 'No visible layer colors found.');
+  }, [pixels, layerOrder]);
+
+  const evaluateCustomMixBaseColors = useCallback(() => {
+    if (!pixels) return;
+    const parsedBaseColors = customMixBaseHexes.map((hex) => hexToRgb(hex));
+    if (parsedBaseColors.some((rgb) => !rgb)) {
+      setStatusMessage('Please enter 4 valid Hex colors before evaluating.');
+      return;
+    }
+    const result = buildColorMixAdvisorResult(pixels, layerOrder, parsedBaseColors);
+    setColorMixAdvisorResult(result ? { ...result, modeLabel: 'Custom 4-Color Evaluation' } : null);
+    setStatusMessage(result ? 'Evaluated the current model against your 4 custom colors.' : 'No visible layer colors found.');
+  }, [customMixBaseHexes, pixels, layerOrder]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -1455,6 +1707,117 @@ const App = () => {
                     <p className="text-[9px] text-slate-500 leading-relaxed">Greedily merges the closest visible color groups until the canvas reaches the target count.</p>
                   </div>
                   {statusMessage && <p className="text-[9px] font-bold text-indigo-600 bg-white border border-indigo-100 rounded-xl px-3 py-2">{statusMessage}</p>}
+                </div>
+                <div className="bg-slate-50 p-5 rounded-[1.5rem] border border-slate-100 space-y-4 shadow-inner">
+                  <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">Color Mixing Advisor</p>
+                  <p className="text-[9px] text-slate-500 leading-relaxed">Approximate advisor for Bambu-style color mixing. Uses ideal Hex/RGB base colors, linear RGB mixing, and OKLab error scoring to estimate how well the current model colors can be reproduced.</p>
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <div className="bg-white rounded-[1.25rem] border border-slate-100 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Suggest 4 Base Colors</p>
+                          <p className="text-[9px] text-slate-500">Generate ideal color slots from the current visible model colors.</p>
+                        </div>
+                        <button onClick={suggestColorMixAdvisor} disabled={!pixels || uniqueColorCount === 0} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Suggest 4 Base Colors</button>
+                      </div>
+                      {suggestedMixBaseColors.length > 0 && (
+                        <div className="grid grid-cols-2 gap-2">
+                          {suggestedMixBaseColors.map((rgb, index) => (
+                            <div key={`suggested-mix-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
+                              <div className="w-8 h-8 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(rgb) }} />
+                              <div className="min-w-0">
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
+                                <p className="text-[9px] font-bold text-slate-700 truncate">{rgbToHex(rgb)}</p>
+                                <p className="text-[8px] text-slate-500 truncate">{formatRgbLabel(rgb)}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="bg-white rounded-[1.25rem] border border-slate-100 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Evaluate Custom 4 Colors</p>
+                          <p className="text-[9px] text-slate-500">Enter four Hex colors to see how the current layer colors could be mixed from them.</p>
+                        </div>
+                        <button onClick={evaluateCustomMixBaseColors} disabled={!pixels || uniqueColorCount === 0} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Evaluate Custom 4 Colors</button>
+                      </div>
+                      <div className="grid gap-2">
+                        {customMixBaseHexes.map((hex, index) => {
+                          const normalizedHex = normalizeHexColor(hex);
+                          const parsedRgb = hexToRgb(hex);
+                          return (
+                            <div key={`custom-mix-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
+                              <input type="color" value={normalizedHex || '#000000'} onChange={(e) => updateCustomMixBaseHex(index, e.target.value.toUpperCase())} className="w-9 h-9 rounded-lg border border-white p-0 shrink-0 cursor-pointer" />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
+                                <input type="text" value={hex} onChange={(e) => updateCustomMixBaseHex(index, e.target.value)} className="w-full text-[10px] font-bold text-slate-700 bg-transparent outline-none uppercase" placeholder="#RRGGBB" />
+                              </div>
+                              <p className="text-[8px] text-slate-500 min-w-[88px] text-right">{parsedRgb ? formatRgbLabel(parsedRgb) : 'Invalid Hex'}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                  {colorMixAdvisorResult && (
+                    <div className="space-y-3 pt-2 border-t border-slate-100">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Current Evaluation</p>
+                          <p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.modeLabel}</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {colorMixAdvisorResult.baseColors.map((rgb, index) => (
+                            <div key={`result-base-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-2.5 py-2">
+                              <div className="w-6 h-6 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(rgb) }} />
+                              <div>
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
+                                <p className="text-[9px] font-bold text-slate-700">{rgbToHex(rgb)}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Visible Layers</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.layerCount}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Max Error</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.maxError.toFixed(3)}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Avg Error</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.averageError.toFixed(3)}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Within {COLOR_MIX_GOOD_MATCH_THRESHOLD.toFixed(2)}</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.withinThresholdCount} / {colorMixAdvisorResult.summary.layerCount}</p></div>
+                      </div>
+                      <div className="space-y-2">
+                        {colorMixAdvisorResult.layers.map((layer) => (
+                          <div key={`mix-layer-${layer.key}`} className="rounded-[1.25rem] border border-slate-100 bg-white px-4 py-3">
+                            <div className="flex flex-wrap items-center gap-3">
+                              <div className="flex items-center gap-2 min-w-[132px]">
+                                <div className="w-8 h-8 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(layer.targetRgb) }} />
+                                <div>
+                                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Layer {layer.layerNumber}</p>
+                                  <p className="text-[9px] font-bold text-slate-700">{rgbToHex(layer.targetRgb)}</p>
+                                </div>
+                              </div>
+                              <div className="flex-1 min-w-[160px]">
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Best Recipe</p>
+                                <p className="text-[9px] font-bold text-slate-700">{layer.recipeLabel}</p>
+                              </div>
+                              <div className="flex items-center gap-2 min-w-[132px]">
+                                <div className="w-8 h-8 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(layer.mixedRgb) }} />
+                                <div>
+                                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Predicted Color</p>
+                                  <p className="text-[9px] font-bold text-slate-700">{rgbToHex(layer.mixedRgb)}</p>
+                                </div>
+                              </div>
+                              <div className="min-w-[88px] text-right">
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Error</p>
+                                <p className="text-[10px] font-black text-indigo-600">{layer.error.toFixed(3)}</p>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div><button onClick={() => setShowConfirmModal(true)} className="w-full mt-6 py-3 bg-rose-50 text-rose-500 rounded-[1.5rem] font-black text-[10px] border border-rose-100 uppercase tracking-widest transition hover:bg-rose-100 shadow-sm mb-4">Clear Canvas</button>
             </div>
