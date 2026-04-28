@@ -862,6 +862,7 @@ const App = () => {
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 });
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   const layerOrderRef = useRef(layerOrder); const layerHeightAdjustmentsRef = useRef(layerHeightAdjustments); const layerSmoothingSettingsRef = useRef(layerSmoothingSettings);
+  const layerColorInputRefs = useRef({});
   
   useEffect(() => { pixelsRef.current = pixels; }, [pixels]);
   useEffect(() => { layerOrderRef.current = layerOrder; }, [layerOrder]);
@@ -1062,6 +1063,16 @@ const App = () => {
     });
     setStatusMessage(nextState.merged ? 'Layer color updated and merged into an existing layer.' : 'Layer color updated.');
   }, [currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
+
+  const openLayerColorPicker = useCallback((sourceKey) => {
+    const input = layerColorInputRefs.current[sourceKey];
+    if (!input) return;
+    if (typeof input.showPicker === 'function') {
+      input.showPicker();
+      return;
+    }
+    input.click();
+  }, []);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -1727,9 +1738,27 @@ const App = () => {
                         <div key={cs} className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-white hover:shadow-md transition-all">
                           <div className="flex items-center gap-3">
                             <div className="flex flex-col gap-0.5 shrink-0"><button onClick={() => moveLayer(i, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronUp size={12} /></button><button onClick={() => moveLayer(i, 1)} disabled={i === layerOrder.length - 1} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronDown size={12} /></button></div>
-                            <label className="relative w-8 h-8 rounded-lg shadow-inner border border-white shrink-0 overflow-hidden cursor-pointer" style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }}>
-                              <input type="color" value={rgbToHex(col)} onChange={(e) => handleLayerColorChange(cs, e.target.value.toUpperCase())} className="absolute inset-0 opacity-0 cursor-pointer" />
-                            </label>
+                            <div className="relative shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => openLayerColorPicker(cs)}
+                                className="w-8 h-8 rounded-lg shadow-inner border border-white overflow-hidden cursor-pointer active:scale-95 transition"
+                                style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }}
+                                aria-label={`Edit layer ${i + 1} color`}
+                              />
+                              <input
+                                ref={(element) => {
+                                  if (element) layerColorInputRefs.current[cs] = element;
+                                  else delete layerColorInputRefs.current[cs];
+                                }}
+                                type="color"
+                                value={rgbToHex(col)}
+                                onChange={(e) => handleLayerColorChange(cs, e.target.value.toUpperCase())}
+                                tabIndex={-1}
+                                aria-hidden="true"
+                                className="absolute inset-0 opacity-0 pointer-events-none"
+                              />
+                            </div>
                             <div className="flex-1 min-w-0">
                               <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p>
                               <p className="text-[10px] font-bold text-slate-700">{rgbToHex(col)}</p>
