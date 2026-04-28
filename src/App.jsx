@@ -543,6 +543,9 @@ const App = () => {
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
   const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
   const [layerSortMode, setLayerSortMode] = useState('current');
+  const [selected3DLayer, setSelected3DLayer] = useState(null);
+  const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
+  const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
   
   const handleLayerHeightChange = (colorStr, key, delta) => setLayerHeightAdjustments(prev => {
     const current = prev[colorStr] || { plus: 0, minus: 0 };
@@ -553,6 +556,8 @@ const App = () => {
 
   const editorCanvasRef = useRef(null); const scrollContainerRef = useRef(null); const canvasWrapperRef = useRef(null); const originalImageContainerRef = useRef(null);
   const threeRef = useRef(null); const sceneRef = useRef(null); const isDrawingRef = useRef(false);
+  const threeCameraPositionRef = useRef(null); const threeControlsTargetRef = useRef(null);
+  const threePointerStateRef = useRef({ active: false, moved: false, x: 0, y: 0 });
   const dragStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 }); const pinchZoomRef = useRef({ active: false, startDistance: 0, startZoom: 1, anchorX: 0, anchorY: 0, midpointX: 0, midpointY: 0 });
   const originalDragRef = useRef({ active: false, x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 });
@@ -959,20 +964,64 @@ const App = () => {
     setClipboard({ data: d, width: x2 - x1 + 1, height: y2 - y1 + 1 }); setSelection(null); setStatusMessage("コピーしました！"); setTool('paste');
   }, [selection]);
 
-  const moveLayer = (idx, dir) => {
+  const applyLayerOrderChange = useCallback((nextLayerOrder, options = {}) => {
+    if (!pixels) return false;
+    if (nextLayerOrder.length !== layerOrder.length || nextLayerOrder.every((key, index) => key === layerOrder[index])) return false;
+    setLayerOrder(nextLayerOrder);
+    setLayerSortMode(options.sortMode || 'current');
+    pushToHistory(pixels, { layerOrder: nextLayerOrder });
+    if (options.statusMessage) setStatusMessage(options.statusMessage);
+    return true;
+  }, [pixels, layerOrder, pushToHistory]);
+
+  const moveLayer = useCallback((idx, dir) => {
     const ni = idx + dir; if (ni < 0 || ni >= layerOrder.length) return;
-    const no = [...layerOrder]; const t = no[idx]; no[idx] = no[ni]; no[ni] = t; setLayerOrder(no); setLayerSortMode('current');
-  };
+    const no = [...layerOrder]; const t = no[idx]; no[idx] = no[ni]; no[ni] = t;
+    applyLayerOrderChange(no);
+  }, [applyLayerOrderChange, layerOrder]);
+
+  const enter3DLayerMoveMode = useCallback(() => {
+    setDraft3DLayerOrder([...layerOrder]);
+    setSelected3DLayer(null);
+    setIs3DLayerMoveMode(true);
+  }, [layerOrder]);
+
+  const cancel3DLayerMoveMode = useCallback(() => {
+    setIs3DLayerMoveMode(false);
+    setDraft3DLayerOrder([]);
+    setSelected3DLayer(null);
+  }, []);
+
+  const confirm3DLayerMoveMode = useCallback(() => {
+    if (!is3DLayerMoveMode) return;
+    const hasChanged = draft3DLayerOrder.length === layerOrder.length && draft3DLayerOrder.some((key, index) => key !== layerOrder[index]);
+    if (hasChanged) applyLayerOrderChange(draft3DLayerOrder, { statusMessage: 'Layer order updated from 3D View' });
+    cancel3DLayerMoveMode();
+  }, [applyLayerOrderChange, cancel3DLayerMoveMode, draft3DLayerOrder, is3DLayerMoveMode, layerOrder]);
+
+  const moveDraft3DLayer = useCallback((dir) => {
+    if (!selected3DLayer) return;
+    setDraft3DLayerOrder(prev => {
+      const idx = prev.indexOf(selected3DLayer); const nextIdx = idx + dir;
+      if (idx < 0 || nextIdx < 0 || nextIdx >= prev.length) return prev;
+      const nextOrder = [...prev]; const temp = nextOrder[idx]; nextOrder[idx] = nextOrder[nextIdx]; nextOrder[nextIdx] = temp;
+      return nextOrder;
+    });
+  }, [selected3DLayer]);
+
+  const handleTabChange = useCallback((nextTab) => {
+    if (nextTab !== '3d' && is3DLayerMoveMode) cancel3DLayerMoveMode();
+    setActiveTab(nextTab);
+  }, [cancel3DLayerMoveMode, is3DLayerMoveMode]);
 
   const applyLayerSort = useCallback((mode) => {
-    setLayerSortMode(mode);
     if (mode === 'current' || !pixels) return;
     const nextLayerOrder = getSortedLayerOrder(layerOrder, pixels, mode);
-    if (nextLayerOrder.every((key, index) => key === layerOrder[index])) return;
-    setLayerOrder(nextLayerOrder);
-    pushToHistory(pixels, { layerOrder: nextLayerOrder });
-    setStatusMessage(`Layers sorted by ${LAYER_SORT_OPTIONS.find((option) => option.value === mode)?.label || mode}`);
-  }, [pixels, layerOrder, pushToHistory]);
+    applyLayerOrderChange(nextLayerOrder, {
+      sortMode: mode,
+      statusMessage: `Layers sorted by ${LAYER_SORT_OPTIONS.find((option) => option.value === mode)?.label || mode}`,
+    });
+  }, [applyLayerOrderChange, pixels, layerOrder]);
 
   useEffect(() => {
     if (isLoadingRef.current) return;
@@ -999,20 +1048,23 @@ const App = () => {
 
   useEffect(() => {
     if (activeTab === '3d' && pixels && threeRef.current) {
+      const displayLayerOrder = is3DLayerMoveMode ? draft3DLayerOrder : layerOrder;
       const container = threeRef.current; while (container.firstChild) container.removeChild(container.firstChild);
       const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf8fafc);
       const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 10000);
       const renderer = new THREE.WebGLRenderer({ antialias: true }); renderer.setSize(container.clientWidth, container.clientHeight);
       container.appendChild(renderer.domElement); const controls = new OrbitControls(camera, renderer.domElement);
+      renderer.domElement.style.cursor = 'grab';
       scene.add(new THREE.AmbientLight(0xffffff, 0.6)); const light = new THREE.DirectionalLight(0xffffff, 0.8); light.position.set(200, 400, 200); scene.add(light);
       const group = new THREE.Group(); const h = pixels.length; const w = pixels[0].length;
+      const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2(); const selectableMeshes = [];
       if (baseThickness > 0) {
         const baseGeo = new THREE.BoxGeometry(w * dotSize, h * dotSize, baseThickness);
         const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshLambertMaterial({ color: 0xdddddd }));
         baseMesh.position.set(0, 0, baseThickness / 2); group.add(baseMesh);
       }
       let cz = baseThickness;
-      layerOrder.forEach((cs, li) => {
+      displayLayerOrder.forEach((cs, li) => {
         const col = JSON.parse(cs); const sm = layerSmoothingSettings[cs] || { smoothOuter: false, smoothInner: false, tolerance: 0.1, offset: 0 };
         const adj = layerHeightAdjustments[cs] || { plus: 0, minus: 0 };
         const zPlus = typeof adj === 'number' ? adj : (adj.plus || 0);
@@ -1020,7 +1072,7 @@ const App = () => {
         const thick = layerThickness + zPlus + zMinus; 
         
         if (thick > 0.0001) {
-          const targetKeys = new Set(layerOrder.slice(li)); let contours = getUnionContours(pixels, targetKeys);
+          const targetKeys = new Set(displayLayerOrder.slice(li)); let contours = getUnionContours(pixels, targetKeys);
           const paths = contours.map(c => {
             const area = calculateArea(c); const isHole = area < 0; 
             const enabled = isHole ? sm.smoothInner : sm.smoothOuter;
@@ -1046,17 +1098,89 @@ const App = () => {
           shapeGrp.forEach(sg => {
             const shape = new THREE.Shape(sg.outer); sg.holes.forEach(hp => shape.holes.push(new THREE.Path(hp)));
             const geom = new THREE.ExtrudeGeometry(shape, { depth: thick, bevelEnabled: false });
-            const mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(`rgb(${col[0]},${col[1]},${col[2]})`), side: THREE.DoubleSide });
-            const mesh = new THREE.Mesh(geom, mat); mesh.position.z = cz - zMinus; group.add(mesh);
+            const isSelectedLayer = selected3DLayer === cs;
+            const mat = new THREE.MeshLambertMaterial({
+              color: new THREE.Color(`rgb(${col[0]},${col[1]},${col[2]})`),
+              side: THREE.DoubleSide,
+              emissive: isSelectedLayer ? new THREE.Color(0xffffff) : new THREE.Color(0x000000),
+              emissiveIntensity: isSelectedLayer ? 0.22 : 0,
+            });
+            const mesh = new THREE.Mesh(geom, mat); mesh.position.z = cz - zMinus; mesh.userData.layerKey = cs; group.add(mesh); selectableMeshes.push(mesh);
           });
         }
         cz += (layerThickness + zPlus);
       });
       scene.add(group); sceneRef.current = group; const box = new THREE.Box3().setFromObject(group); const center = box.getCenter(new THREE.Vector3());
-      camera.position.set(center.x, center.y - 100, center.z + 100); controls.target.copy(center); controls.update();
-      const animate = () => { if (threeRef.current) { requestAnimationFrame(animate); renderer.render(scene, camera); } }; animate();
+      if (threeCameraPositionRef.current && threeControlsTargetRef.current) {
+        camera.position.copy(threeCameraPositionRef.current);
+        controls.target.copy(threeControlsTargetRef.current);
+      } else {
+        camera.position.set(center.x, center.y - 100, center.z + 100);
+        controls.target.copy(center);
+      }
+      controls.update();
+      const persistThreeViewState = () => {
+        threeCameraPositionRef.current = camera.position.clone();
+        threeControlsTargetRef.current = controls.target.clone();
+      };
+      persistThreeViewState();
+      controls.addEventListener('change', persistThreeViewState);
+      const handlePointerDown = (event) => {
+        threePointerStateRef.current = { active: true, moved: false, x: event.clientX, y: event.clientY };
+      };
+      const handlePointerMove = (event) => {
+        if (!threePointerStateRef.current.active) return;
+        const dx = event.clientX - threePointerStateRef.current.x;
+        const dy = event.clientY - threePointerStateRef.current.y;
+        if (Math.hypot(dx, dy) > 6) threePointerStateRef.current.moved = true;
+      };
+      const handlePointerUp = (event) => {
+        const pointerState = threePointerStateRef.current;
+        threePointerStateRef.current.active = false;
+        if (pointerState.moved) return;
+        const bounds = renderer.domElement.getBoundingClientRect();
+        pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1;
+        pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1;
+        raycaster.setFromCamera(pointer, camera);
+        const intersections = raycaster.intersectObjects(selectableMeshes, false);
+        const nextSelectedLayer = intersections[0]?.object?.userData?.layerKey || null;
+        setSelected3DLayer(nextSelectedLayer);
+      };
+      const handleControlsStart = () => { renderer.domElement.style.cursor = 'grabbing'; };
+      const handleControlsEnd = () => { renderer.domElement.style.cursor = 'grab'; };
+      controls.addEventListener('start', handleControlsStart);
+      controls.addEventListener('end', handleControlsEnd);
+      if (is3DLayerMoveMode) {
+        renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+        renderer.domElement.addEventListener('pointermove', handlePointerMove);
+        renderer.domElement.addEventListener('pointerup', handlePointerUp);
+      }
+      let frameId = null;
+      const animate = () => {
+        if (!threeRef.current) return;
+        frameId = requestAnimationFrame(animate);
+        renderer.render(scene, camera);
+      };
+      animate();
+      return () => {
+        if (is3DLayerMoveMode) {
+          renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+          renderer.domElement.removeEventListener('pointermove', handlePointerMove);
+          renderer.domElement.removeEventListener('pointerup', handlePointerUp);
+        }
+        controls.removeEventListener('change', persistThreeViewState);
+        controls.removeEventListener('start', handleControlsStart);
+        controls.removeEventListener('end', handleControlsEnd);
+        if (frameId) cancelAnimationFrame(frameId);
+        controls.dispose();
+        renderer.dispose();
+        while (container.firstChild) container.removeChild(container.firstChild);
+      };
     }
-  }, [activeTab, pixels, dotSize, layerThickness, baseThickness, layerOrder, layerHeightAdjustments, layerSmoothingSettings]);
+  }, [activeTab, pixels, dotSize, layerThickness, baseThickness, layerOrder, layerHeightAdjustments, layerSmoothingSettings, selected3DLayer, draft3DLayerOrder, is3DLayerMoveMode]);
+
+  const selected3DLayerIndex = selected3DLayer ? (is3DLayerMoveMode ? draft3DLayerOrder.indexOf(selected3DLayer) : layerOrder.indexOf(selected3DLayer)) : -1;
+  const selected3DLayerColor = selected3DLayerIndex >= 0 ? JSON.parse(selected3DLayer) : null;
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
@@ -1256,7 +1380,39 @@ const App = () => {
             </div>
           )}
           {activeTab === '3d' && (
-            <div className="h-full flex flex-col"><div className="px-6 py-3 border-b border-slate-50 flex justify-between items-center shrink-0"><h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2"><BoxIcon className="text-indigo-600" size={18}/> 3D Preview</h2><button onClick={exportSTL} className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> Export STL</button></div><div ref={threeRef} className="flex-1 bg-slate-50/50" /></div>
+            <div className="h-full flex flex-col">
+              <div className="px-6 py-3 border-b border-slate-50 flex justify-between items-center gap-3 shrink-0">
+                <h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2 shrink-0"><BoxIcon className="text-indigo-600" size={18}/> 3D Preview</h2>
+                <div className="flex items-center gap-2 shrink-0">
+                  {is3DLayerMoveMode ? (
+                    <>
+                      <button onClick={cancel3DLayerMoveMode} className="flex items-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-slate-300 transition active:scale-95">Cancel</button>
+                      <button onClick={confirm3DLayerMoveMode} className="flex items-center gap-1 bg-indigo-600 text-white px-3 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-indigo-700 transition active:scale-95">Confirm</button>
+                    </>
+                  ) : (
+                    <button onClick={enter3DLayerMoveMode} className="flex items-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95">Move Layers</button>
+                  )}
+                  <button onClick={exportSTL} className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> Export STL</button>
+                </div>
+              </div>
+              <div className="flex-1 relative bg-slate-50/50">
+                <div ref={threeRef} className="absolute inset-0" />
+                {is3DLayerMoveMode && (
+                  <>
+                    <div className="absolute top-4 left-4 z-20 flex items-center gap-2 bg-white/90 backdrop-blur-md shadow-lg rounded-2xl px-3 py-2 border border-white">
+                      <div className={`w-4 h-4 rounded-md border border-slate-200 shrink-0 ${selected3DLayerColor ? '' : 'bg-slate-100'}`} style={selected3DLayerColor ? { backgroundColor: `rgb(${selected3DLayerColor[0]},${selected3DLayerColor[1]},${selected3DLayerColor[2]})` } : undefined} />
+                      <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">
+                        {selected3DLayerIndex >= 0 ? `Selected Layer ${selected3DLayerIndex + 1}` : 'Tap a layer'}
+                      </p>
+                    </div>
+                    <div className="absolute bottom-4 right-4 z-20 flex flex-col gap-2">
+                      <button onClick={() => moveDraft3DLayer(-1)} disabled={selected3DLayerIndex <= 0} className="flex items-center justify-center gap-1 bg-white/95 text-slate-600 px-4 py-3 rounded-2xl text-[9px] font-black shadow-lg border border-white disabled:opacity-30 disabled:cursor-not-allowed hover:text-indigo-600 transition active:scale-95"><ChevronUp size={16} /> Move Up</button>
+                      <button onClick={() => moveDraft3DLayer(1)} disabled={selected3DLayerIndex < 0 || selected3DLayerIndex === draft3DLayerOrder.length - 1} className="flex items-center justify-center gap-1 bg-white/95 text-slate-600 px-4 py-3 rounded-2xl text-[9px] font-black shadow-lg border border-white disabled:opacity-30 disabled:cursor-not-allowed hover:text-indigo-600 transition active:scale-95"><ChevronDown size={16} /> Move Down</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
           )}
           {activeTab === 'settings' && (
             <div className="h-full px-6 py-4 overflow-auto custom-scrollbar">
@@ -1307,7 +1463,7 @@ const App = () => {
       </main>
       <nav className="flex justify-center items-center bg-white/90 backdrop-blur-lg border-t border-slate-100 px-2 py-1 shadow-[0_-4px_20px_rgba(0,0,0,0.02)] z-30 shrink-0">
         <div className="flex gap-1">
-          {[ { id: 'editor', icon: Edit3, label: 'Editor' }, { id: 'layers', icon: Layers, label: 'Layers' }, { id: '3d', icon: BoxIcon, label: '3D View' }, { id: 'settings', icon: Settings, label: 'Setup' } ].map(item => (<NavItem key={item.id} id={item.id} icon={item.icon} label={item.label} isActive={activeTab === item.id} onClick={setActiveTab} />))}
+          {[ { id: 'editor', icon: Edit3, label: 'Editor' }, { id: 'layers', icon: Layers, label: 'Layers' }, { id: '3d', icon: BoxIcon, label: '3D View' }, { id: 'settings', icon: Settings, label: 'Setup' } ].map(item => (<NavItem key={item.id} id={item.id} icon={item.icon} label={item.label} isActive={activeTab === item.id} onClick={handleTabChange} />))}
         </div>
       </nav>
       <style dangerouslySetInnerHTML={{ __html: `
