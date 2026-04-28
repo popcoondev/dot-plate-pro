@@ -312,6 +312,42 @@ const buildColorMixAdvisorResult = (pixels, layerOrder, baseColors) => {
   };
 };
 
+const buildAppliedColorMixState = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, advisorResult) => {
+  if (!pixels || !advisorResult?.layers?.length) return null;
+
+  const replacementMap = new Map(advisorResult.layers.map((layer) => [layer.key, JSON.stringify(layer.mixedRgb)]));
+  const nextPixels = pixels.map((row) => row.map((pixel) => {
+    if (!Array.isArray(pixel)) return pixel;
+    const key = JSON.stringify(pixel);
+    const replacementKey = replacementMap.get(key);
+    return replacementKey ? JSON.parse(replacementKey) : pixel;
+  }));
+
+  const nextLayerOrder = [];
+  const seenKeys = new Set();
+  layerOrder.forEach((key) => {
+    const replacementKey = replacementMap.get(key) || key;
+    if (replacementKey === TRANSPARENT_KEY || seenKeys.has(replacementKey)) return;
+    seenKeys.add(replacementKey);
+    nextLayerOrder.push(replacementKey);
+  });
+
+  const nextLayerHeightAdjustments = {};
+  const nextLayerSmoothingSettings = {};
+  layerOrder.forEach((key) => {
+    const replacementKey = replacementMap.get(key) || key;
+    if (!(replacementKey in nextLayerHeightAdjustments) && key in layerHeightAdjustments) nextLayerHeightAdjustments[replacementKey] = layerHeightAdjustments[key];
+    if (!(replacementKey in nextLayerSmoothingSettings) && key in layerSmoothingSettings) nextLayerSmoothingSettings[replacementKey] = layerSmoothingSettings[key];
+  });
+
+  return {
+    nextPixels,
+    nextLayerOrder,
+    nextLayerHeightAdjustments,
+    nextLayerSmoothingSettings,
+  };
+};
+
 const rgbToHslLike = (rgb) => {
   const r = rgb[0] / 255;
   const g = rgb[1] / 255;
@@ -930,6 +966,31 @@ const App = () => {
     setColorMixAdvisorResult(result ? { ...result, modeLabel: 'Custom 4-Color Evaluation' } : null);
     setStatusMessage(result ? 'Evaluated the current model against your 4 custom colors.' : 'No visible layer colors found.');
   }, [customMixBaseHexes, pixels, layerOrder]);
+
+  const applyColorMixAdvisorResult = useCallback(() => {
+    if (!pixels || !colorMixAdvisorResult) return;
+    const appliedState = buildAppliedColorMixState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, colorMixAdvisorResult);
+    if (!appliedState) {
+      setStatusMessage('No evaluated colors available to apply.');
+      return;
+    }
+
+    setPixels(appliedState.nextPixels);
+    setLayerOrder(appliedState.nextLayerOrder);
+    setLayerHeightAdjustments(appliedState.nextLayerHeightAdjustments);
+    setLayerSmoothingSettings(appliedState.nextLayerSmoothingSettings);
+
+    const currentColorKey = JSON.stringify(currentColor);
+    const replacementLayer = colorMixAdvisorResult.layers.find((layer) => layer.key === currentColorKey);
+    if (replacementLayer) setCurrentColor(replacementLayer.mixedRgb);
+
+    pushToHistory(appliedState.nextPixels, {
+      layerOrder: appliedState.nextLayerOrder,
+      layerHeightAdjustments: appliedState.nextLayerHeightAdjustments,
+      layerSmoothingSettings: appliedState.nextLayerSmoothingSettings,
+    });
+    setStatusMessage('Applied evaluated color mixing result to the model.');
+  }, [colorMixAdvisorResult, currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -1768,7 +1829,8 @@ const App = () => {
                           <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Current Evaluation</p>
                           <p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.modeLabel}</p>
                         </div>
-                        <div className="flex flex-wrap gap-2">
+                        <div className="flex flex-wrap gap-2 items-center">
+                          <button onClick={applyColorMixAdvisorResult} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase hover:bg-indigo-700 transition">Apply Evaluated Colors</button>
                           {colorMixAdvisorResult.baseColors.map((rgb, index) => (
                             <div key={`result-base-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-2.5 py-2">
                               <div className="w-6 h-6 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(rgb) }} />
