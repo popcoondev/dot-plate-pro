@@ -859,12 +859,14 @@ const App = () => {
   const threePointerStateRef = useRef({ active: false, moved: false, x: 0, y: 0 });
   const dragStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 }); const pinchZoomRef = useRef({ active: false, startDistance: 0, startZoom: 1, anchorX: 0, anchorY: 0, midpointX: 0, midpointY: 0 });
   const originalDragRef = useRef({ active: false, x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
-  const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 });
+  const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 }); const zoomRef = useRef(zoom);
+  const safariGestureScaleRef = useRef(1);
   const isLoadingRef = useRef(false); const pixelsRef = useRef(null); const toolbarRef = useRef(null);
   const layerOrderRef = useRef(layerOrder); const layerHeightAdjustmentsRef = useRef(layerHeightAdjustments); const layerSmoothingSettingsRef = useRef(layerSmoothingSettings);
   const layerColorInputRefs = useRef({});
   
   useEffect(() => { pixelsRef.current = pixels; }, [pixels]);
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { layerOrderRef.current = layerOrder; }, [layerOrder]);
   useEffect(() => { layerHeightAdjustmentsRef.current = layerHeightAdjustments; }, [layerHeightAdjustments]);
   useEffect(() => { layerSmoothingSettingsRef.current = layerSmoothingSettings; }, [layerSmoothingSettings]);
@@ -1274,6 +1276,20 @@ const App = () => {
     });
   };
 
+  const applyAnchoredZoom = useCallback((clientX, clientY, zoomFactor) => {
+    const canvas = editorCanvasRef.current;
+    if (!canvas || !Number.isFinite(zoomFactor) || zoomFactor <= 0) return;
+    const currentZoom = zoomRef.current;
+    const canvasRect = canvas.getBoundingClientRect();
+    const anchorX = (clientX - canvasRect.left) / (10 * currentZoom);
+    const anchorY = (clientY - canvasRect.top) / (10 * currentZoom);
+    const nextZoom = Math.min(10, Math.max(0.05, currentZoom * zoomFactor));
+    if (Math.abs(nextZoom - currentZoom) < 0.0001) return;
+    zoomRef.current = nextZoom;
+    setZoom(nextZoom);
+    syncPinchAnchor(nextZoom, clientX, clientY, anchorX, anchorY);
+  }, []);
+
   const startDrawingNormal = (e) => {
     if (useVirtualPad || !editorCanvasRef.current) return;
     const cx = e.touches ? e.touches[0].clientX : e.clientX; const cy = e.touches ? e.touches[0].clientY : e.clientY;
@@ -1319,6 +1335,52 @@ const App = () => {
     const r = editorCanvasRef.current.getBoundingClientRect(); const x = Math.floor((cx - r.left) / (10 * zoom)); const y = Math.floor((cy - r.top) / (10 * zoom));
     if (x >= 0 && y >= 0 && x < (pixelsRef.current?.[0]?.length || 0) && y < (pixelsRef.current?.length || 0)) handleToolAction(x, y, false);
   };
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || activeTab !== 'editor' || !pixels) return;
+
+    const handleTrackpadPinchWheel = (event) => {
+      if (!container.contains(event.target)) return;
+      const isBrowserPinch = event.ctrlKey || event.metaKey || Math.abs(event.deltaZ) > 0;
+      if (!isBrowserPinch) return;
+      event.preventDefault();
+      const zoomFactor = Math.exp(-event.deltaY * 0.01);
+      applyAnchoredZoom(event.clientX, event.clientY, zoomFactor);
+    };
+
+    const handleSafariGestureStart = (event) => {
+      if (!container.contains(event.target)) return;
+      safariGestureScaleRef.current = 1;
+      event.preventDefault();
+    };
+
+    const handleSafariGestureChange = (event) => {
+      if (!container.contains(event.target)) return;
+      event.preventDefault();
+      const previousScale = safariGestureScaleRef.current || 1;
+      const nextScale = event.scale || 1;
+      const zoomFactor = nextScale / previousScale;
+      safariGestureScaleRef.current = nextScale;
+      applyAnchoredZoom(event.clientX, event.clientY, zoomFactor);
+    };
+
+    const handleSafariGestureEnd = () => {
+      safariGestureScaleRef.current = 1;
+    };
+
+    container.addEventListener('wheel', handleTrackpadPinchWheel, { passive: false });
+    container.addEventListener('gesturestart', handleSafariGestureStart, { passive: false });
+    container.addEventListener('gesturechange', handleSafariGestureChange, { passive: false });
+    container.addEventListener('gestureend', handleSafariGestureEnd);
+
+    return () => {
+      container.removeEventListener('wheel', handleTrackpadPinchWheel);
+      container.removeEventListener('gesturestart', handleSafariGestureStart);
+      container.removeEventListener('gesturechange', handleSafariGestureChange);
+      container.removeEventListener('gestureend', handleSafariGestureEnd);
+    };
+  }, [activeTab, applyAnchoredZoom, pixels]);
 
   const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; resetPinchZoom(); };
   const startOriginalImageDrag = (e) => {
