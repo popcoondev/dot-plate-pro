@@ -348,6 +348,42 @@ const buildAppliedColorMixState = (pixels, layerOrder, layerHeightAdjustments, l
   };
 };
 
+const buildLayerColorEditState = (pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, sourceKey, nextRgb) => {
+  if (!pixels || !sourceKey || !Array.isArray(nextRgb)) return null;
+  const targetKey = JSON.stringify(nextRgb);
+  if (sourceKey === targetKey) return null;
+
+  const nextPixels = pixels.map((row) => row.map((pixel) => JSON.stringify(pixel) === sourceKey ? [...nextRgb] : pixel));
+  const hasExistingTargetLayer = layerOrder.includes(targetKey);
+
+  let nextLayerOrder;
+  let nextLayerHeightAdjustments;
+  let nextLayerSmoothingSettings;
+
+  if (hasExistingTargetLayer) {
+    nextLayerOrder = layerOrder.filter((key) => key !== sourceKey);
+    nextLayerHeightAdjustments = Object.fromEntries(Object.entries(layerHeightAdjustments).filter(([key]) => key !== sourceKey));
+    nextLayerSmoothingSettings = Object.fromEntries(Object.entries(layerSmoothingSettings).filter(([key]) => key !== sourceKey));
+  } else {
+    nextLayerOrder = layerOrder.map((key) => key === sourceKey ? targetKey : key);
+    nextLayerHeightAdjustments = Object.fromEntries(
+      Object.entries(layerHeightAdjustments).map(([key, value]) => [key === sourceKey ? targetKey : key, value])
+    );
+    nextLayerSmoothingSettings = Object.fromEntries(
+      Object.entries(layerSmoothingSettings).map(([key, value]) => [key === sourceKey ? targetKey : key, value])
+    );
+  }
+
+  return {
+    nextPixels,
+    nextLayerOrder,
+    nextLayerHeightAdjustments,
+    nextLayerSmoothingSettings,
+    targetKey,
+    merged: hasExistingTargetLayer,
+  };
+};
+
 const rgbToHslLike = (rgb) => {
   const r = rgb[0] / 255;
   const g = rgb[1] / 255;
@@ -991,6 +1027,41 @@ const App = () => {
     });
     setStatusMessage('Applied evaluated color mixing result to the model.');
   }, [colorMixAdvisorResult, currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
+
+  const handleLayerColorChange = useCallback((sourceKey, nextHex) => {
+    if (!pixels) return;
+    const nextRgb = hexToRgb(nextHex);
+    if (!nextRgb) {
+      setStatusMessage('Invalid layer color.');
+      return;
+    }
+
+    const nextState = buildLayerColorEditState(
+      pixels,
+      layerOrder,
+      layerHeightAdjustments,
+      layerSmoothingSettings,
+      sourceKey,
+      nextRgb
+    );
+    if (!nextState) return;
+
+    setPixels(nextState.nextPixels);
+    setLayerOrder(nextState.nextLayerOrder);
+    setLayerHeightAdjustments(nextState.nextLayerHeightAdjustments);
+    setLayerSmoothingSettings(nextState.nextLayerSmoothingSettings);
+    setLayerSortMode('current');
+
+    const currentColorKey = JSON.stringify(currentColor);
+    if (currentColorKey === sourceKey) setCurrentColor(nextRgb);
+
+    pushToHistory(nextState.nextPixels, {
+      layerOrder: nextState.nextLayerOrder,
+      layerHeightAdjustments: nextState.nextLayerHeightAdjustments,
+      layerSmoothingSettings: nextState.nextLayerSmoothingSettings,
+    });
+    setStatusMessage(nextState.merged ? 'Layer color updated and merged into an existing layer.' : 'Layer color updated.');
+  }, [currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
 
   const handleToolAction = useCallback((x, y, isFirst) => {
     setPixels(prev => {
@@ -1656,8 +1727,14 @@ const App = () => {
                         <div key={cs} className="flex flex-col gap-2 p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-white hover:shadow-md transition-all">
                           <div className="flex items-center gap-3">
                             <div className="flex flex-col gap-0.5 shrink-0"><button onClick={() => moveLayer(i, -1)} disabled={i === 0} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronUp size={12} /></button><button onClick={() => moveLayer(i, 1)} disabled={i === layerOrder.length - 1} className="p-1 text-slate-400 hover:text-indigo-600 disabled:opacity-20 active:scale-90 transition bg-white rounded-md border border-slate-100 shadow-sm"><ChevronDown size={12} /></button></div>
-                            <div className="w-8 h-8 rounded-lg shadow-inner border border-white shrink-0" style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }} />
-                            <div className="flex-1 min-w-0"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p><p className="text-[10px] font-bold text-slate-700">Top: <span className="text-indigo-600">{(baseThickness + chs[i]).toFixed(1)}mm</span></p></div>
+                            <label className="relative w-8 h-8 rounded-lg shadow-inner border border-white shrink-0 overflow-hidden cursor-pointer" style={{ backgroundColor: `rgb(${col[0]},${col[1]},${col[2]})` }}>
+                              <input type="color" value={rgbToHex(col)} onChange={(e) => handleLayerColorChange(cs, e.target.value.toUpperCase())} className="absolute inset-0 opacity-0 cursor-pointer" />
+                            </label>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest truncate">Layer {i+1}</p>
+                              <p className="text-[10px] font-bold text-slate-700">{rgbToHex(col)}</p>
+                              <p className="text-[10px] font-bold text-slate-700">Top: <span className="text-indigo-600">{(baseThickness + chs[i]).toFixed(1)}mm</span></p>
+                            </div>
                             <div className="flex flex-col gap-1 shrink-0">
                                 <div className="flex items-center gap-1 justify-end">
                                     <span className="text-[7px] font-black text-slate-400 uppercase w-4">Z+</span>
