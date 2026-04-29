@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { parseGIF, decompressFrames } from 'gifuct-js';
 import { 
   Upload, 
   Download, 
@@ -886,6 +887,36 @@ const blurActiveElement = () => {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 };
 
+const buildGifFrameSources = async (arrayBuffer) => {
+  const gif = parseGIF(arrayBuffer);
+  const frames = decompressFrames(gif, true);
+  const width = gif.lsd.width;
+  const height = gif.lsd.height;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, width, height);
+
+  let previousFrame = null;
+  let restoreImageData = null;
+
+  return frames.map((frame) => {
+    if (previousFrame?.disposalType === 2) {
+      ctx.clearRect(previousFrame.dims.left, previousFrame.dims.top, previousFrame.dims.width, previousFrame.dims.height);
+    } else if (previousFrame?.disposalType === 3 && restoreImageData) {
+      ctx.putImageData(restoreImageData, 0, 0);
+    }
+
+    restoreImageData = frame.disposalType === 3 ? ctx.getImageData(0, 0, width, height) : null;
+    const imageData = new ImageData(frame.patch, frame.dims.width, frame.dims.height);
+    ctx.putImageData(imageData, frame.dims.left, frame.dims.top);
+    previousFrame = frame;
+
+    return canvas.toDataURL('image/png');
+  });
+};
+
 const NavItem = ({ id, icon: Icon, label, isActive, onClick }) => (
   <button onClick={() => onClick(id)} className={`flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 transition-all rounded-lg ${isActive ? 'text-indigo-600 bg-indigo-50' : 'text-slate-400'}`}>
     <Icon size={18} strokeWidth={isActive ? 2.5 : 2} />
@@ -916,6 +947,8 @@ const App = () => {
   const [sampleOffsetX, setSampleOffsetX] = useState(0); const [sampleOffsetY, setSampleOffsetY] = useState(0);
   const [isResolutionToolbarVisible, setIsResolutionToolbarVisible] = useState(true);
   const [isBrushToolbarVisible, setIsBrushToolbarVisible] = useState(true); const [isToolSelectorVisible, setIsToolSelectorVisible] = useState(true);
+  const [gifFrames, setGifFrames] = useState([]);
+  const [selectedGifFrameIndex, setSelectedGifFrameIndex] = useState(0);
   const [canvasAdjustSizeInput, setCanvasAdjustSizeInput] = useState('32');
   const [canvasAdjustPaddingInput, setCanvasAdjustPaddingInput] = useState('2');
   const [pendingCanvasResize, setPendingCanvasResize] = useState(null);
@@ -1320,11 +1353,41 @@ const App = () => {
   }, [syncLayersFromPixels, pushToHistory]);
 
   const handleUpload = useCallback((f) => {
-    if (!f) return; const r = new FileReader();
+    if (!f) return;
+    const fn = f.name.split('.').slice(0, -1).join('.');
+    setProjectName(fn); setOutputFileName(fn); setOriginalFilePath(f.name); 
+    setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
+
+    const isGif = f.type === 'image/gif' || /\.gif$/i.test(f.name);
+    if (isGif) {
+      f.arrayBuffer().then(async (buffer) => {
+        try {
+          const frames = await buildGifFrameSources(buffer);
+          if (!frames.length) throw new Error('No GIF frames decoded');
+          setGifFrames(frames);
+          setSelectedGifFrameIndex(0);
+          setSourceImage(frames[0]);
+          reprocessImage(frames[0], gridSize, sampleOffsetX, sampleOffsetY);
+        } catch {
+          const fallbackReader = new FileReader();
+          fallbackReader.onload = (e) => {
+            setGifFrames([]);
+            setSelectedGifFrameIndex(0);
+            setSourceImage(e.target.result);
+            reprocessImage(e.target.result, gridSize, sampleOffsetX, sampleOffsetY);
+            setStatusMessage('GIF frame decode failed. Loaded the image without frame controls.');
+          };
+          fallbackReader.readAsDataURL(f);
+        }
+      });
+      return;
+    }
+
+    const r = new FileReader();
     r.onload = (e) => {
-      const fn = f.name.split('.').slice(0, -1).join('.');
-      setProjectName(fn); setOutputFileName(fn); setSourceImage(e.target.result); setOriginalFilePath(f.name); 
-      setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
+      setGifFrames([]);
+      setSelectedGifFrameIndex(0);
+      setSourceImage(e.target.result);
       reprocessImage(e.target.result, gridSize, sampleOffsetX, sampleOffsetY);
     };
     r.readAsDataURL(f);
@@ -1333,7 +1396,7 @@ const App = () => {
   const handleNewCanvas = useCallback(() => {
     const s = gridSize; const n = Array.from({ length: s }, () => Array.from({ length: s }, () => [...TRANSPARENT_COLOR]));
     const def = getFormattedDate("compact"); setProjectName(def); setOutputFileName(def);
-    setSourceImage(null); setShowOriginal(false); setOriginalFilePath(""); setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
+    setSourceImage(null); setGifFrames([]); setSelectedGifFrameIndex(0); setShowOriginal(false); setOriginalFilePath(""); setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
     setPixels(n); pushToHistory(n); syncLayersFromPixels(n); setTool('pen'); setShowConfirmModal(false);
     const ip = { x: Math.floor(s / 2), y: Math.floor(s / 2) }; setCursorPos(ip); cursorSubPixelRef.current = { ...ip };
   }, [gridSize, pushToHistory, syncLayersFromPixels]);
@@ -1355,7 +1418,7 @@ const App = () => {
           isLoadingRef.current = true; setProjectName(d.projectName || ""); setOutputFileName(d.outputFileName || "");
           setAuthor(d.author || ""); setCreatedAt(d.createdAt || ""); setOriginalFilePath(d.originalFilePath || "");
           setGridSize(d.gridSize); setDotSize(d.dotSize); setLayerThickness(d.layerThickness); setBaseThickness(d.baseThickness);
-          setPadSensitivity(d.padSensitivity); setLayerOrder(d.layerOrder || []); setSourceImage(d.sourceImage || null); setPixels(d.pixels);
+          setPadSensitivity(d.padSensitivity); setLayerOrder(d.layerOrder || []); setSourceImage(d.sourceImage || null); setGifFrames([]); setSelectedGifFrameIndex(0); setPixels(d.pixels);
           setLayerHeightAdjustments(d.layerHeightAdjustments || {}); setLayerSmoothingSettings(d.layerSmoothingSettings || {});
           setHistory({ stack: [JSON.stringify(createHistorySnapshot(d.pixels, { layerOrder: d.layerOrder || [], layerHeightAdjustments: d.layerHeightAdjustments || {}, layerSmoothingSettings: d.layerSmoothingSettings || {} }))], step: 0 }); setStatusMessage("プロジェクトを復元しました！📂");
           setTimeout(() => { isLoadingRef.current = false; centerCanvas(); }, 100);
@@ -1405,6 +1468,17 @@ const App = () => {
     );
     setShowCanvasAdjustModal(false);
   }, [applySquareCanvasChange, pixels]);
+
+  const selectGifFrame = useCallback((nextIndex) => {
+    if (!gifFrames.length) return;
+    const clampedIndex = Math.max(0, Math.min(gifFrames.length - 1, nextIndex));
+    const nextFrame = gifFrames[clampedIndex];
+    if (!nextFrame) return;
+    setSelectedGifFrameIndex(clampedIndex);
+    setSourceImage(nextFrame);
+    setHistory({ stack: [], step: -1 });
+    reprocessImage(nextFrame, gridSize, sampleOffsetX, sampleOffsetY);
+  }, [gifFrames, gridSize, sampleOffsetX, sampleOffsetY, reprocessImage]);
 
   const exportSTL = () => {
     if (!sceneRef.current) return; const ex = new STLExporter();
@@ -1954,6 +2028,16 @@ const App = () => {
                       <input type="range" min={MIN_CANVAS_SIZE} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
                       <button onClick={() => setGridSize(prev => Math.min(MAX_RESOLUTION, prev + 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Plus size={14} /></button>
                     </div>
+                    {gifFrames.length > 1 && (
+                      <div className="w-full mt-3 px-1 py-2 rounded-2xl border border-slate-100 bg-slate-50/80 flex items-center justify-between gap-3">
+                        <button onClick={() => selectGifFrame(selectedGifFrameIndex - 1)} disabled={selectedGifFrameIndex <= 0} className="px-3 py-2 rounded-xl bg-white border border-slate-100 text-[9px] font-black text-slate-600 shadow-sm uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 transition">Prev</button>
+                        <div className="text-center">
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">GIF Frame</p>
+                          <p className="text-[10px] font-black text-slate-700">{selectedGifFrameIndex + 1} / {gifFrames.length}</p>
+                        </div>
+                        <button onClick={() => selectGifFrame(selectedGifFrameIndex + 1)} disabled={selectedGifFrameIndex >= gifFrames.length - 1} className="px-3 py-2 rounded-xl bg-white border border-slate-100 text-[9px] font-black text-slate-600 shadow-sm uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 transition">Next</button>
+                      </div>
+                    )}
                     {sourceImage && showSampleOffsetControls && (
                       <div className="mt-3 pt-3 border-t border-slate-100 space-y-3 px-1">
                         <div className="space-y-1"><label className="text-[9px] font-black text-slate-400 uppercase flex justify-between"><span>X-Axis Sampling Offset</span><span className="font-mono text-indigo-500">{sampleOffsetX.toFixed(2)}</span></label><input type="range" min="-0.5" max="0.5" step="0.001" value={sampleOffsetX} onChange={(e) => setSampleOffsetX(parseFloat(e.target.value))} className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" /></div>
