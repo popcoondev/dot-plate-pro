@@ -2028,7 +2028,7 @@ const App = () => {
                       <input type="range" min={MIN_CANVAS_SIZE} max={MAX_RESOLUTION} step="1" value={gridSize} onChange={(e) => setGridSize(parseInt(e.target.value))} className="flex-1 accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full" />
                       <button onClick={() => setGridSize(prev => Math.min(MAX_RESOLUTION, prev + 1))} className="p-1 text-slate-400 hover:text-indigo-600 active:scale-90 transition"><Plus size={14} /></button>
                     </div>
-                    {gifFrames.length > 1 && (
+                    {gifFrames.length > 0 && (
                       <div className="w-full mt-3 px-1 py-2 rounded-2xl border border-slate-100 bg-slate-50/80 flex items-center justify-between gap-3">
                         <button onClick={() => selectGifFrame(selectedGifFrameIndex - 1)} disabled={selectedGifFrameIndex <= 0} className="px-3 py-2 rounded-xl bg-white border border-slate-100 text-[9px] font-black text-slate-600 shadow-sm uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 transition">Prev</button>
                         <div className="text-center">
