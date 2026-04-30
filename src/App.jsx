@@ -212,8 +212,8 @@ const build3mfModelXml = (meshGroups, metadata) => {
     `<metadata name="dotplate:exportedAt">${escapeXml(metadata.exportedAt)}</metadata>`,
   ].join('');
 
-  const basematerialsXml = baseEntries
-    .map(({ group }) => `<base name="${escapeXml(group.label)}" displaycolor="${group.displayHex}" />`)
+  const colorGroupXml = baseEntries
+    .map(({ group }) => `<m:color color="${group.displayHex}FF" />`)
     .join('');
 
   const objectsXml = baseEntries.map(({ materialIndex, objectId, group }) => {
@@ -221,9 +221,9 @@ const build3mfModelXml = (meshGroups, metadata) => {
       .map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}" />`)
       .join('');
     const trianglesXml = group.triangles
-      .map(([v1, v2, v3]) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" />`)
+      .map(([v1, v2, v3]) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" pid="1" p1="${materialIndex}" p2="${materialIndex}" p3="${materialIndex}" />`)
       .join('');
-    return `<object id="${objectId}" type="model" pid="1" pindex="${materialIndex}"><mesh><vertices>${verticesXml}</vertices><triangles>${trianglesXml}</triangles></mesh></object>`;
+    return `<object id="${objectId}" type="model"><mesh><vertices>${verticesXml}</vertices><triangles>${trianglesXml}</triangles></mesh></object>`;
   }).join('');
 
   const componentsXml = baseEntries
@@ -231,10 +231,10 @@ const build3mfModelXml = (meshGroups, metadata) => {
     .join('');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
 ${metadataNodes}
 <resources>
-<basematerials id="1">${basematerialsXml}</basematerials>
+<m:colorgroup id="1">${colorGroupXml}</m:colorgroup>
 ${objectsXml}
 <object id="${compositeObjectId}" type="model"><components>${componentsXml}</components></object>
 </resources>
@@ -263,6 +263,269 @@ const build3mfMixMetadata = (advisorResult, meshGroups) => JSON.stringify({
       error: group.advisorLayer.error,
       usageCount: group.advisorLayer.usageCount,
     })),
+}, null, 2);
+
+const sanitizeObjName = (value) => String(value || 'layer')
+  .replace(/[^a-zA-Z0-9_-]+/g, '_')
+  .replace(/^_+|_+$/g, '') || 'layer';
+
+const buildObjBundle = (meshGroups, baseName) => {
+  const objName = `${baseName}.obj`;
+  const mtlName = `${baseName}.mtl`;
+  const objLines = [`mtllib ${mtlName}`];
+  const mtlLines = [];
+  let vertexOffset = 1;
+
+  meshGroups.forEach((group, index) => {
+    const materialName = sanitizeObjName(group.label || `layer_${index + 1}`);
+    objLines.push(`o ${materialName}`);
+    objLines.push(`g ${materialName}`);
+    objLines.push(`usemtl ${materialName}`);
+    group.vertices.forEach(([x, y, z]) => {
+      objLines.push(`v ${x} ${y} ${z}`);
+    });
+    group.triangles.forEach(([v1, v2, v3]) => {
+      objLines.push(`f ${v1 + vertexOffset} ${v2 + vertexOffset} ${v3 + vertexOffset}`);
+    });
+    vertexOffset += group.vertices.length;
+
+    const [r, g, b] = group.displayRgb.map((channel) => (channel / 255).toFixed(6));
+    mtlLines.push(`newmtl ${materialName}`);
+    mtlLines.push(`Ka ${r} ${g} ${b}`);
+    mtlLines.push(`Kd ${r} ${g} ${b}`);
+    mtlLines.push(`Ks 0.000000 0.000000 0.000000`);
+    mtlLines.push(`d 1.0`);
+    mtlLines.push(`illum 1`);
+    mtlLines.push('');
+  });
+
+  return {
+    objName,
+    mtlName,
+    objText: `${objLines.join('\n')}\n`,
+    mtlText: `${mtlLines.join('\n')}\n`,
+  };
+};
+
+const BambuPaintTokenPool = {
+  roots: ['8', '4', '0', 'C'],
+  mixed: ['4C', '0C', '5C', '6C', '7C', '1C', '2C', '3C', '9C', 'AC', 'BC', 'CC', 'DC', 'EC', 'FC'],
+};
+
+const formatBambuRatio = (ratio) => Number(ratio || 0).toFixed(4);
+
+const buildBambuFilamentPalette = (advisorResult) => {
+  const baseEntries = advisorResult.baseColors.map((rgb, index) => ({
+    key: `root:${index}`,
+    kind: 'root',
+    token: BambuPaintTokenPool.roots[index] || `${index}`,
+    displayRgb: rgb,
+    displayHex: rgbToHex(rgb),
+    components: [],
+    ratios: [],
+    filamentIndex: index + 1,
+  }));
+
+  const mixedEntryMap = new Map();
+  advisorResult.layers.forEach((layer) => {
+    if (!layer.recipeComponents?.length || layer.recipeComponents.length <= 1) return;
+    const recipeKey = layer.recipeComponents
+      .map(({ index, ratio }) => `${index + 1}:${formatBambuRatio(ratio)}`)
+      .join('|');
+    if (mixedEntryMap.has(recipeKey)) return;
+    mixedEntryMap.set(recipeKey, {
+      key: recipeKey,
+      kind: 'mixed',
+      displayRgb: layer.mixedRgb,
+      displayHex: rgbToHex(layer.mixedRgb),
+      components: layer.recipeComponents.map(({ index }) => index + 1),
+      ratios: layer.recipeComponents.map(({ ratio }) => formatBambuRatio(ratio)),
+    });
+  });
+
+  const mixedEntries = Array.from(mixedEntryMap.values()).map((entry, index) => ({
+    ...entry,
+    token: BambuPaintTokenPool.mixed[index] || `${(index + 1).toString(16).toUpperCase()}C`,
+    filamentIndex: baseEntries.length + index + 1,
+  }));
+
+  const byLayerKey = new Map();
+  advisorResult.layers.forEach((layer) => {
+    if (!layer.recipeComponents?.length || layer.recipeComponents.length === 1) {
+      const componentIndex = layer.recipeComponents?.[0]?.index ?? 0;
+      byLayerKey.set(layer.key, baseEntries[componentIndex] || baseEntries[0]);
+      return;
+    }
+    const recipeKey = layer.recipeComponents
+      .map(({ index, ratio }) => `${index + 1}:${formatBambuRatio(ratio)}`)
+      .join('|');
+    byLayerKey.set(layer.key, mixedEntryMap.has(recipeKey)
+      ? mixedEntries.find((entry) => entry.key === recipeKey)
+      : baseEntries[0]);
+  });
+
+  return {
+    entries: [...baseEntries, ...mixedEntries],
+    byLayerKey,
+  };
+};
+
+const generatePseudoUuid = (seed) => {
+  const normalized = seed.toString(16).padStart(8, '0').slice(-8);
+  const suffix = `${(seed * 7919).toString(16)}${(seed * 104729).toString(16)}`.padEnd(12, '0').slice(0, 12);
+  return `${normalized}-81cb-4c03-9d28-${suffix}`;
+};
+
+const collectBambuMeshGroups = (group, layerOrder, advisorLayers, filamentPalette) => (
+  collect3mfMeshGroups(group, layerOrder, advisorLayers).map((meshGroup, index) => {
+    const zValues = meshGroup.vertices.map(([, , z]) => z);
+    const minZ = zValues.length ? Math.min(...zValues) : 0;
+    const maxZ = zValues.length ? Math.max(...zValues) : 0;
+    const paletteEntry = filamentPalette.byLayerKey.get(meshGroup.layerKey) || filamentPalette.entries[0];
+    return {
+      ...meshGroup,
+      objectId: index + 1,
+      vertices: meshGroup.vertices.map(([x, y, z]) => [x, y, z - minZ]),
+      minZ,
+      maxZ,
+      bambuPaintToken: paletteEntry?.token || '8',
+      bambuFilamentIndex: paletteEntry?.filamentIndex || 1,
+      bambuPaletteEntry: paletteEntry || null,
+    };
+  })
+);
+
+const buildBambuObjectModelXml = (meshGroups) => {
+  const objectXml = meshGroups.map((group) => {
+    const verticesXml = group.vertices
+      .map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}" />`)
+      .join('');
+    const trianglesXml = group.triangles
+      .map(([v1, v2, v3]) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" paint_color="${group.bambuPaintToken}" />`)
+      .join('');
+    return `<object id="${group.objectId}" p:UUID="${generatePseudoUuid(group.objectId)}" type="model"><mesh><vertices>${verticesXml}</vertices><triangles>${trianglesXml}</triangles></mesh></object>`;
+  }).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">
+ <metadata name="BambuStudio:3mfVersion">1</metadata>
+ <resources>
+  ${objectXml}
+ </resources>
+</model>`;
+};
+
+const buildBambuProjectModelXml = (meshGroups, metadata) => {
+  const compositeObjectId = meshGroups.length + 1;
+  const componentsXml = meshGroups.map((group) => {
+    const zOffset = Number(group.minZ || 0);
+    return `<component p:path="/3D/Objects/object_1.model" objectid="${group.objectId}" transform="1 0 0 0 1 0 0 0 1 0 0 ${zOffset}" />`;
+  }).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">
+<metadata name="Application">Dot Plate Pro</metadata>
+<metadata name="BambuStudio:3mfVersion">1</metadata>
+<metadata name="dotplate:mixMetadataPath">Metadata/dotplate-color-mixing.json</metadata>
+<metadata name="dotplate:exportedAt">${escapeXml(metadata.exportedAt)}</metadata>
+<resources>
+<object id="${compositeObjectId}" type="model"><components>${componentsXml}</components></object>
+</resources>
+<build><item objectid="${compositeObjectId}" /></build>
+</model>`;
+};
+
+const buildBambuModelRelationshipsXml = () => `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
+</Relationships>`;
+
+const buildBambuModelSettingsConfig = (meshGroups, metadata) => {
+  const compositeObjectId = meshGroups.length + 1;
+  const partsXml = meshGroups.map((group, index) => {
+    const zOffset = Number(group.minZ || 0);
+    return `<part id="${index + 1}" subtype="normal_part">
+      <metadata key="name" value="${escapeXml(group.label.replace(/\s+/g, '_'))}"/>
+      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 ${zOffset} 0 0 0 1"/>
+      <metadata key="source_file" value="${escapeXml(metadata.sourceFileName)}"/>
+      <metadata key="source_object_id" value="0"/>
+      <metadata key="source_volume_id" value="${index}"/>
+      <metadata key="source_offset_x" value="0"/>
+      <metadata key="source_offset_y" value="0"/>
+      <metadata key="source_offset_z" value="${zOffset}"/>
+      <mesh_stat face_count="${group.triangles.length}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
+    </part>`;
+  }).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="${compositeObjectId}">
+    <metadata key="name" value="DotPlatePro"/>
+    <metadata key="extruder" value="1"/>
+    <metadata face_count="${meshGroups.reduce((sum, group) => sum + group.triangles.length, 0)}"/>
+    ${partsXml}
+  </object>
+  <plate>
+    <metadata key="plater_id" value="1"/>
+    <metadata key="plater_name" value=""/>
+    <metadata key="locked" value="false"/>
+    <metadata key="filament_map_mode" value="Auto For Flush"/>
+    <model_instance>
+      <metadata key="object_id" value="${compositeObjectId}"/>
+      <metadata key="instance_id" value="0"/>
+      <metadata key="identify_id" value="1370"/>
+    </model_instance>
+  </plate>
+  <assemble>
+    <assemble_item object_id="${compositeObjectId}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 90 90 0" offset="0 0 0" />
+  </assemble>
+</config>`;
+};
+
+const buildBambuProjectSettingsConfig = (filamentPalette) => {
+  const filamentColour = filamentPalette.entries.map((entry) => entry.displayHex);
+  const filamentIsMixed = filamentPalette.entries.map((entry) => entry.kind === 'mixed' ? '1' : '0');
+  const filamentMixedComponents = filamentPalette.entries.map((entry) => entry.kind === 'mixed' ? entry.components.join(',') : '');
+  const filamentMixedRatios = filamentPalette.entries.map((entry) => entry.kind === 'mixed' ? entry.ratios.join(',') : '');
+  const baseJson = {
+    filament_colour: filamentColour,
+    filament_multi_colour: filamentColour,
+    filament_colour_type: filamentPalette.entries.map(() => '1'),
+    filament_is_mixed: filamentIsMixed,
+    filament_mixed_components: filamentMixedComponents,
+    filament_mixed_sublayer_ratios: filamentMixedRatios,
+    filament_map: filamentPalette.entries.map(() => '1'),
+    filament_map_mode: 'Auto For Flush',
+    filament_ids: filamentPalette.entries.map(() => 'GFA00'),
+    filament_type: filamentPalette.entries.map(() => 'PLA'),
+    filament_vendor: filamentPalette.entries.map(() => 'Generic'),
+    filament_flow_ratio: filamentPalette.entries.map(() => '0.98'),
+    filament_diameter: filamentPalette.entries.map(() => '1.75'),
+    filament_cost: filamentPalette.entries.map(() => '24.99'),
+    filament_density: filamentPalette.entries.map(() => '1.26'),
+    filament_multi_colour_enable: filamentPalette.entries.map(() => '1'),
+    print_extruder_id: ['1'],
+    printer_extruder_id: ['1'],
+    wall_filament: '0',
+    sparse_infill_filament: '0',
+    solid_infill_filament: '0',
+    support_filament: '0',
+    support_interface_filament: '0',
+    single_extruder_multi_material: '1',
+    enable_mixed_color_sublayer: '1',
+    extruder_colour: filamentColour,
+    default_filament_colour: filamentColour,
+    default_filament_profile: filamentPalette.entries.map(() => 'Generic PLA'),
+  };
+  return JSON.stringify(baseJson, null, 4);
+};
+
+const buildBambuFilamentSequenceJson = () => JSON.stringify({
+  plate_1: {
+    nozzle_sequence: [],
+    optimal_assignment: [],
+    sequence: [],
+  },
 }, null, 2);
 
 const hexToRgb = (value) => {
@@ -1098,6 +1361,8 @@ const App = () => {
   const [layerSortMode, setLayerSortMode] = useState('current');
   const [customMixBaseHexes, setCustomMixBaseHexes] = useState(['', '', '', '']);
   const [isExporting3MF, setIsExporting3MF] = useState(false);
+  const [isExportingBambu3MF, setIsExportingBambu3MF] = useState(false);
+  const [isExportingOBJ, setIsExportingOBJ] = useState(false);
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
@@ -1621,6 +1886,45 @@ const App = () => {
     a.click(); setStatusMessage("STL出力完了！📦");
   };
 
+  const exportOBJ = useCallback(async () => {
+    if (!sceneRef.current) {
+      setStatusMessage('No OBJ export source is available.');
+      return;
+    }
+    if (isExportingOBJ) return;
+
+    setIsExportingOBJ(true);
+    setStatusMessage('OBJ/MTLを構築中...');
+    try {
+      const meshGroups = collect3mfMeshGroups(sceneRef.current, layerOrder, null);
+      if (!meshGroups.length) {
+        setStatusMessage('No mesh data available for OBJ export.');
+        return;
+      }
+
+      const timestamp = getFormattedDate('filename');
+      const baseName = `${timestamp}_obj_${outputFileName || 'dotplate'}`;
+      const { objName, mtlName, objText, mtlText } = buildObjBundle(meshGroups, baseName);
+      const zip = new JSZip();
+      zip.file(objName, objText);
+      zip.file(mtlName, mtlText);
+
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `${baseName}.zip`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatusMessage('OBJ/MTL出力完了！🎨');
+    } catch (error) {
+      console.error(error);
+      setStatusMessage('OBJ export failed.');
+    } finally {
+      setIsExportingOBJ(false);
+    }
+  }, [isExportingOBJ, layerOrder, outputFileName]);
+
   const export3MF = useCallback(async () => {
     if (!sceneRef.current) {
       setStatusMessage('No 3MF export source is available.');
@@ -1677,6 +1981,75 @@ const App = () => {
       setIsExporting3MF(false);
     }
   }, [isExporting3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
+
+  const exportBambu3MF = useCallback(async () => {
+    if (!sceneRef.current) {
+      setStatusMessage('No Bambu 3MF export source is available.');
+      return;
+    }
+    if (!rootColorPreviewResult) {
+      setStatusMessage('Please prepare 4 valid root colors before exporting Bambu 3MF.');
+      return;
+    }
+    if (isExportingBambu3MF) return;
+
+    setIsExportingBambu3MF(true);
+    setStatusMessage('Bambu 3MFを構築中...');
+    try {
+      const filamentPalette = buildBambuFilamentPalette(rootColorPreviewResult);
+      const meshGroups = collectBambuMeshGroups(sceneRef.current, layerOrder, rootColorPreviewResult.layers, filamentPalette);
+      if (!meshGroups.length) {
+        setStatusMessage('No mesh data available for Bambu 3MF export.');
+        return;
+      }
+
+      const timestamp = getFormattedDate('filename');
+      const sourceFileName = `${timestamp}_3mf_${outputFileName || 'dotplate'}.3mf`;
+      const metadata = {
+        exportedAt: new Date().toISOString(),
+        projectName: projectName || 'dotplate',
+        sourceFileName,
+      };
+      const topLevelModelXml = buildBambuProjectModelXml(meshGroups, metadata);
+      const objectModelXml = buildBambuObjectModelXml(meshGroups);
+      const modelSettingsConfig = buildBambuModelSettingsConfig(meshGroups, metadata);
+      const projectSettingsConfig = buildBambuProjectSettingsConfig(filamentPalette);
+      const mixMetadataJson = build3mfMixMetadata(rootColorPreviewResult, meshGroups);
+      const zip = new JSZip();
+      zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />
+  <Default Extension="config" ContentType="text/plain" />
+  <Default Extension="json" ContentType="application/json" />
+</Types>`);
+      zip.folder('_rels')?.file('.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
+</Relationships>`);
+      zip.folder('3D')?.file('3dmodel.model', topLevelModelXml);
+      zip.folder('3D')?.folder('_rels')?.file('3dmodel.model.rels', buildBambuModelRelationshipsXml());
+      zip.folder('3D')?.folder('Objects')?.file('object_1.model', objectModelXml);
+      zip.folder('Metadata')?.file('project_settings.config', projectSettingsConfig);
+      zip.folder('Metadata')?.file('model_settings.config', modelSettingsConfig);
+      zip.folder('Metadata')?.file('filament_sequence.json', buildBambuFilamentSequenceJson());
+      zip.folder('Metadata')?.file('dotplate-color-mixing.json', mixMetadataJson);
+
+      const blob = await zip.generateAsync({ type: 'blob', mimeType: 'model/3mf' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `${timestamp}_bambu_3mf_${outputFileName || 'dotplate'}.3mf`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatusMessage('Experimental Bambu 3MF export complete.');
+    } catch (error) {
+      console.error(error);
+      setStatusMessage('Bambu 3MF export failed.');
+    } finally {
+      setIsExportingBambu3MF(false);
+    }
+  }, [isExportingBambu3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
 
   const exportImage = useCallback(async () => {
     if (!pixels || isExporting) return; setIsExporting(true); setStatusMessage("画像を構築中...");
@@ -2428,13 +2801,16 @@ const App = () => {
                     <button onClick={enter3DLayerMoveMode} className="flex items-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95">Move Layers</button>
                   )}
                   <button onClick={exportSTL} className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> Export STL</button>
+                  <button onClick={exportOBJ} disabled={isExportingOBJ} className="flex items-center gap-2 bg-sky-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-sky-700 transition active:scale-95"><DownloadCloud size={14} /> {isExportingOBJ ? 'Building OBJ' : 'Export OBJ'}</button>
                   <button onClick={export3MF} disabled={!is3mfExportReady || isExporting3MF} className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition active:scale-95"><DownloadCloud size={14} /> {isExporting3MF ? 'Building 3MF' : 'Export 3MF'}</button>
+                  <button onClick={exportBambu3MF} disabled={!is3mfExportReady || isExportingBambu3MF} className="flex items-center gap-2 bg-amber-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-amber-600 transition active:scale-95"><DownloadCloud size={14} /> {isExportingBambu3MF ? 'Building Bambu 3MF' : 'Export Bambu 3MF'}</button>
                 </div>
               </div>
               <div className="px-6 pt-3">
                 <p className={`text-[9px] font-black uppercase tracking-widest ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
                   {is3mfExportReady ? '3MF ready' : 'Needs re-evaluation for 3MF export'}
                 </p>
+                <p className="text-[8px] font-bold uppercase tracking-widest text-amber-600 mt-1">Bambu 3MF is experimental</p>
               </div>
               <div className="flex-1 relative bg-slate-50/50">
                 <div ref={threeRef} className="absolute inset-0" />
