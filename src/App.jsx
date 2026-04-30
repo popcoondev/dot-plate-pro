@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { parseGIF, decompressFrames } from 'gifuct-js';
+import JSZip from 'jszip';
 import { 
   Upload, 
   Download, 
@@ -123,6 +124,146 @@ const normalizeHexColor = (value) => {
   if (/^[0-9a-fA-F]{6}$/.test(raw)) return `#${raw.toUpperCase()}`;
   return null;
 };
+
+const escapeXml = (value) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&apos;');
+
+const collect3mfMeshGroups = (group, layerOrder, advisorLayers) => {
+  if (!group) return [];
+  const advisorLayerMap = new Map((advisorLayers || []).map((layer) => [layer.key, layer]));
+  const layerIndexMap = new Map(layerOrder.map((key, index) => [key, index]));
+  const meshGroups = new Map();
+
+  group.updateWorldMatrix(true, true);
+  group.traverse((child) => {
+    if (!child.isMesh || !child.geometry) return;
+    const positionAttribute = child.geometry.getAttribute('position');
+    if (!positionAttribute) return;
+
+    const layerKey = child.userData?.layerKey || '__base__';
+    const advisorLayer = advisorLayerMap.get(layerKey);
+    const materialColor = child.material?.color;
+    const fallbackHex = materialColor ? `#${materialColor.getHexString().toUpperCase()}` : '#DCDCDC';
+    const fallbackRgb = materialColor
+      ? [
+          Math.round(materialColor.r * 255),
+          Math.round(materialColor.g * 255),
+          Math.round(materialColor.b * 255),
+        ]
+      : [220, 220, 220];
+    const displayRgb = advisorLayer?.mixedRgb || fallbackRgb;
+    const displayHex = advisorLayer ? rgbToHex(advisorLayer.mixedRgb) : fallbackHex;
+    const label = layerKey === '__base__'
+      ? 'Base'
+      : `Layer ${((layerIndexMap.get(layerKey) ?? 0) + 1)}`;
+
+    if (!meshGroups.has(layerKey)) {
+      meshGroups.set(layerKey, {
+        layerKey,
+        label,
+        displayHex,
+        displayRgb,
+        vertices: [],
+        triangles: [],
+        advisorLayer,
+      });
+    }
+
+    const target = meshGroups.get(layerKey);
+    const indexAttribute = child.geometry.getIndex();
+    const position = new THREE.Vector3();
+    const triangleBuffer = [];
+
+    const pushVertex = (vertexIndex) => {
+      position.fromBufferAttribute(positionAttribute, vertexIndex);
+      position.applyMatrix4(child.matrixWorld);
+      target.vertices.push([position.x, position.y, position.z]);
+      triangleBuffer.push(target.vertices.length - 1);
+      if (triangleBuffer.length === 3) {
+        target.triangles.push([...triangleBuffer]);
+        triangleBuffer.length = 0;
+      }
+    };
+
+    if (indexAttribute) {
+      for (let i = 0; i < indexAttribute.count; i++) pushVertex(indexAttribute.getX(i));
+    } else {
+      for (let i = 0; i < positionAttribute.count; i++) pushVertex(i);
+    }
+  });
+
+  return Array.from(meshGroups.values()).filter((entry) => entry.vertices.length > 0 && entry.triangles.length > 0);
+};
+
+const build3mfModelXml = (meshGroups, metadata) => {
+  const baseEntries = meshGroups.map((group, index) => ({
+    materialIndex: index,
+    objectId: index + 2,
+    group,
+  }));
+  const compositeObjectId = meshGroups.length + 2;
+  const metadataNodes = [
+    `<metadata name="Application">Dot Plate Pro</metadata>`,
+    `<metadata name="dotplate:mixMetadataPath">Metadata/dotplate-color-mixing.json</metadata>`,
+    `<metadata name="dotplate:exportedAt">${escapeXml(metadata.exportedAt)}</metadata>`,
+  ].join('');
+
+  const basematerialsXml = baseEntries
+    .map(({ group }) => `<base name="${escapeXml(group.label)}" displaycolor="${group.displayHex}" />`)
+    .join('');
+
+  const objectsXml = baseEntries.map(({ materialIndex, objectId, group }) => {
+    const verticesXml = group.vertices
+      .map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}" />`)
+      .join('');
+    const trianglesXml = group.triangles
+      .map(([v1, v2, v3]) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" />`)
+      .join('');
+    return `<object id="${objectId}" type="model" pid="1" pindex="${materialIndex}"><mesh><vertices>${verticesXml}</vertices><triangles>${trianglesXml}</triangles></mesh></object>`;
+  }).join('');
+
+  const componentsXml = baseEntries
+    .map(({ objectId }) => `<component objectid="${objectId}" />`)
+    .join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+${metadataNodes}
+<resources>
+<basematerials id="1">${basematerialsXml}</basematerials>
+${objectsXml}
+<object id="${compositeObjectId}" type="model"><components>${componentsXml}</components></object>
+</resources>
+<build><item objectid="${compositeObjectId}" /></build>
+</model>`;
+};
+
+const build3mfMixMetadata = (advisorResult, meshGroups) => JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  baseColors: advisorResult.baseColors.map((rgb, index) => ({
+    index: index + 1,
+    hex: rgbToHex(rgb),
+    rgb,
+  })),
+  layers: meshGroups
+    .filter((group) => group.layerKey !== '__base__' && group.advisorLayer)
+    .map((group) => ({
+      layerKey: group.layerKey,
+      label: group.label,
+      targetRgb: group.advisorLayer.targetRgb,
+      mixedRgb: group.advisorLayer.mixedRgb,
+      mixedHex: rgbToHex(group.advisorLayer.mixedRgb),
+      recipeLabel: group.advisorLayer.recipeLabel,
+      recipeComponents: group.advisorLayer.recipeComponents || [],
+      error: group.advisorLayer.error,
+      usageCount: group.advisorLayer.usageCount,
+    })),
+}, null, 2);
 
 const hexToRgb = (value) => {
   const normalized = normalizeHexColor(value);
@@ -294,6 +435,7 @@ const buildColorMixAdvisorResult = (pixels, layerOrder, baseColors) => {
       targetRgb: color,
       usageCount: count,
       recipeLabel: bestCandidate.recipeLabel,
+      recipeComponents: bestCandidate.components,
       mixedRgb: bestCandidate.mixedRgb,
       error: bestError,
     };
@@ -954,9 +1096,8 @@ const App = () => {
   const [pendingCanvasResize, setPendingCanvasResize] = useState(null);
   const [targetColorCount, setTargetColorCount] = useState(DEFAULT_TARGET_COLOR_COUNT);
   const [layerSortMode, setLayerSortMode] = useState('current');
-  const [suggestedMixBaseColors, setSuggestedMixBaseColors] = useState([]);
   const [customMixBaseHexes, setCustomMixBaseHexes] = useState(['', '', '', '']);
-  const [colorMixAdvisorResult, setColorMixAdvisorResult] = useState(null);
+  const [isExporting3MF, setIsExporting3MF] = useState(false);
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
@@ -1071,9 +1212,13 @@ const App = () => {
   }), [restoreHistorySnapshot]);
 
   const uniqueColorCount = pixels ? collectUniqueColorStats(pixels).size : 0;
-  const modelSuggestedMixBaseColors = pixels ? suggestIdealMixBaseColors(pixels, COLOR_MIX_BASE_COUNT) : [];
-  const fallbackMixBaseHexes = Array.from({ length: COLOR_MIX_BASE_COUNT }, (_, index) => modelSuggestedMixBaseColors[index] ? rgbToHex(modelSuggestedMixBaseColors[index]) : '');
-  const resolvedCustomMixBaseHexes = customMixBaseHexes.map((hex, index) => hex || fallbackMixBaseHexes[index] || '');
+  const normalizedRootColorHexes = customMixBaseHexes.map((hex) => normalizeHexColor(hex) || '');
+  const parsedRootColors = normalizedRootColorHexes.map((hex) => hexToRgb(hex));
+  const hasValidRootColors = parsedRootColors.every((rgb) => Array.isArray(rgb)) && parsedRootColors.length === COLOR_MIX_BASE_COUNT;
+  const rootColorPreviewResult = pixels && hasValidRootColors
+    ? buildColorMixAdvisorResult(pixels, layerOrder, parsedRootColors)
+    : null;
+  const is3mfExportReady = Boolean(pixels && rootColorPreviewResult);
 
   const applyMergedColorState = useCallback((mergedState) => {
     setPixels(mergedState.nextPixels);
@@ -1122,33 +1267,21 @@ const App = () => {
     setCustomMixBaseHexes((prev) => prev.map((hex, hexIndex) => hexIndex === index ? value : hex));
   }, []);
 
-  const suggestColorMixAdvisor = useCallback(() => {
+  const getRootColors = useCallback(() => {
     if (!pixels) return;
     const suggestedColors = suggestIdealMixBaseColors(pixels, COLOR_MIX_BASE_COUNT);
-    const result = buildColorMixAdvisorResult(pixels, layerOrder, suggestedColors);
-    setSuggestedMixBaseColors(suggestedColors);
     setCustomMixBaseHexes(Array.from({ length: COLOR_MIX_BASE_COUNT }, (_, index) => suggestedColors[index] ? rgbToHex(suggestedColors[index]) : ''));
-    setColorMixAdvisorResult(result ? { ...result, modeLabel: `Suggested ${suggestedColors.length} Base Color${suggestedColors.length === 1 ? '' : 's'}` } : null);
-    setStatusMessage(result ? `Suggested ${suggestedColors.length} base colors for the current model.` : 'No visible layer colors found.');
+    setStatusMessage(suggestedColors.length ? `Loaded ${suggestedColors.length} root colors from the current model.` : 'No visible layer colors found.');
   }, [pixels, layerOrder]);
 
-  const evaluateCustomMixBaseColors = useCallback(() => {
-    if (!pixels) return;
-    const parsedBaseColors = resolvedCustomMixBaseHexes.map((hex) => hexToRgb(hex));
-    if (parsedBaseColors.some((rgb) => !rgb)) {
-      setStatusMessage('Please enter 4 valid Hex colors before evaluating.');
+  const updateRootColors = useCallback(() => {
+    if (!pixels || !rootColorPreviewResult) {
+      setStatusMessage('Please prepare 4 valid root colors first.');
       return;
     }
-    const result = buildColorMixAdvisorResult(pixels, layerOrder, parsedBaseColors);
-    setColorMixAdvisorResult(result ? { ...result, modeLabel: 'Custom 4-Color Evaluation' } : null);
-    setStatusMessage(result ? 'Evaluated the current model against your 4 custom colors.' : 'No visible layer colors found.');
-  }, [resolvedCustomMixBaseHexes, pixels, layerOrder]);
-
-  const applyColorMixAdvisorResult = useCallback(() => {
-    if (!pixels || !colorMixAdvisorResult) return;
-    const appliedState = buildAppliedColorMixState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, colorMixAdvisorResult);
+    const appliedState = buildAppliedColorMixState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, rootColorPreviewResult);
     if (!appliedState) {
-      setStatusMessage('No evaluated colors available to apply.');
+      setStatusMessage('No root color update is available.');
       return;
     }
 
@@ -1158,7 +1291,7 @@ const App = () => {
     setLayerSmoothingSettings(appliedState.nextLayerSmoothingSettings);
 
     const currentColorKey = JSON.stringify(currentColor);
-    const replacementLayer = colorMixAdvisorResult.layers.find((layer) => layer.key === currentColorKey);
+    const replacementLayer = rootColorPreviewResult.layers.find((layer) => layer.key === currentColorKey);
     if (replacementLayer) setCurrentColor(replacementLayer.mixedRgb);
 
     pushToHistory(appliedState.nextPixels, {
@@ -1166,8 +1299,8 @@ const App = () => {
       layerHeightAdjustments: appliedState.nextLayerHeightAdjustments,
       layerSmoothingSettings: appliedState.nextLayerSmoothingSettings,
     });
-    setStatusMessage('Applied evaluated color mixing result to the model.');
-  }, [colorMixAdvisorResult, currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
+    setStatusMessage('Updated the model using the current root colors.');
+  }, [currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory, rootColorPreviewResult]);
 
   const handleLayerColorChange = useCallback((sourceKey, nextHex) => {
     if (!pixels) return;
@@ -1487,6 +1620,63 @@ const App = () => {
     a.href = URL.createObjectURL(b); a.download = `${ts}_stl_${outputFileName || 'dotplate'}.stl`;
     a.click(); setStatusMessage("STL出力完了！📦");
   };
+
+  const export3MF = useCallback(async () => {
+    if (!sceneRef.current) {
+      setStatusMessage('No 3MF export source is available.');
+      return;
+    }
+    if (!rootColorPreviewResult) {
+      setStatusMessage('Please prepare 4 valid root colors before exporting 3MF.');
+      return;
+    }
+    if (isExporting3MF) return;
+
+    setIsExporting3MF(true);
+    setStatusMessage('3MFを構築中...');
+    try {
+      const meshGroups = collect3mfMeshGroups(sceneRef.current, layerOrder, rootColorPreviewResult.layers);
+      if (!meshGroups.length) {
+        setStatusMessage('No mesh data available for 3MF export.');
+        return;
+      }
+
+      const metadata = {
+        exportedAt: new Date().toISOString(),
+        projectName: projectName || 'dotplate',
+      };
+      const modelXml = build3mfModelXml(meshGroups, metadata);
+      const mixMetadataJson = build3mfMixMetadata(rootColorPreviewResult, meshGroups);
+      const zip = new JSZip();
+      zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />
+  <Default Extension="json" ContentType="application/json" />
+</Types>`);
+      zip.folder('_rels')?.file('.rels', `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
+</Relationships>`);
+      zip.folder('3D')?.file('3dmodel.model', modelXml);
+      zip.folder('Metadata')?.file('dotplate-color-mixing.json', mixMetadataJson);
+
+      const blob = await zip.generateAsync({ type: 'blob', mimeType: 'model/3mf' });
+      const link = document.createElement('a');
+      const timestamp = getFormattedDate('filename');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `${timestamp}_3mf_${outputFileName || 'dotplate'}.3mf`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatusMessage('3MF出力完了！🎨');
+    } catch (error) {
+      console.error(error);
+      setStatusMessage('3MF export failed.');
+    } finally {
+      setIsExporting3MF(false);
+    }
+  }, [isExporting3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
 
   const exportImage = useCallback(async () => {
     if (!pixels || isExporting) return; setIsExporting(true); setStatusMessage("画像を構築中...");
@@ -2238,7 +2428,13 @@ const App = () => {
                     <button onClick={enter3DLayerMoveMode} className="flex items-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95">Move Layers</button>
                   )}
                   <button onClick={exportSTL} className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> Export STL</button>
+                  <button onClick={export3MF} disabled={!is3mfExportReady || isExporting3MF} className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition active:scale-95"><DownloadCloud size={14} /> {isExporting3MF ? 'Building 3MF' : 'Export 3MF'}</button>
                 </div>
+              </div>
+              <div className="px-6 pt-3">
+                <p className={`text-[9px] font-black uppercase tracking-widest ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {is3mfExportReady ? '3MF ready' : 'Needs re-evaluation for 3MF export'}
+                </p>
               </div>
               <div className="flex-1 relative bg-slate-50/50">
                 <div ref={threeRef} className="absolute inset-0" />
@@ -2302,73 +2498,55 @@ const App = () => {
                   {statusMessage && <p className="text-[9px] font-bold text-indigo-600 bg-white border border-indigo-100 rounded-xl px-3 py-2">{statusMessage}</p>}
                 </div>
                 <div className="bg-slate-50 p-5 rounded-[1.5rem] border border-slate-100 space-y-4 shadow-inner">
-                  <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">Color Mixing Advisor</p>
-                  <p className="text-[9px] text-slate-500 leading-relaxed">Approximate advisor for Bambu-style color mixing. Uses ideal Hex/RGB base colors, linear RGB mixing, and OKLab error scoring to estimate how well the current model colors can be reproduced.</p>
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    <div className="bg-white rounded-[1.25rem] border border-slate-100 p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Suggest 4 Base Colors</p>
-                          <p className="text-[9px] text-slate-500">Generate ideal color slots from the current visible model colors.</p>
-                        </div>
-                        <button onClick={suggestColorMixAdvisor} disabled={!pixels || uniqueColorCount === 0} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Suggest 4 Base Colors</button>
+                  <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">Root Colors</p>
+                  <p className="text-[9px] text-slate-500 leading-relaxed">Get the 4 base filament colors for the current layer drawing, edit them, then update the model to the colors that would actually result from those 4 roots. The same 4 root colors are used for 3MF export.</p>
+                  <div className="bg-white rounded-[1.25rem] border border-slate-100 p-4 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Current Root Colors</p>
+                        <p className="text-[9px] text-slate-500">Load suggested 4 colors from the current layer drawing, then edit them as needed.</p>
                       </div>
-                      {suggestedMixBaseColors.length > 0 && (
-                        <div className="grid grid-cols-2 gap-2">
-                          {suggestedMixBaseColors.map((rgb, index) => (
-                            <div key={`suggested-mix-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
-                              <div className="w-8 h-8 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(rgb) }} />
-                              <div className="min-w-0">
-                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
-                                <p className="text-[9px] font-bold text-slate-700 truncate">{rgbToHex(rgb)}</p>
-                                <p className="text-[8px] text-slate-500 truncate">{formatRgbLabel(rgb)}</p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                      <button onClick={getRootColors} disabled={!pixels || uniqueColorCount === 0} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition">Get Root Colors</button>
                     </div>
-                    <div className="bg-white rounded-[1.25rem] border border-slate-100 p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Evaluate Custom 4 Colors</p>
-                          <p className="text-[9px] text-slate-500">Enter four Hex colors to see how the current layer colors could be mixed from them. Empty fields fall back to the current model suggestion.</p>
-                        </div>
-                        <button onClick={evaluateCustomMixBaseColors} disabled={!pixels || uniqueColorCount === 0} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Evaluate Custom 4 Colors</button>
-                      </div>
-                      <div className="grid gap-2">
-                        {customMixBaseHexes.map((hex, index) => {
-                          const resolvedHex = resolvedCustomMixBaseHexes[index];
-                          const normalizedHex = normalizeHexColor(resolvedHex);
-                          const parsedRgb = hexToRgb(resolvedHex);
-                          return (
-                            <div key={`custom-mix-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
-                              <input type="color" value={normalizedHex || '#000000'} onChange={(e) => updateCustomMixBaseHex(index, e.target.value.toUpperCase())} className="w-9 h-9 rounded-lg border border-white p-0 shrink-0 cursor-pointer" />
-                              <div className="flex-1 min-w-0">
-                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
-                                <input type="text" value={hex} onChange={(e) => updateCustomMixBaseHex(index, e.target.value)} className="w-full text-[10px] font-bold text-slate-700 bg-transparent outline-none uppercase" placeholder={fallbackMixBaseHexes[index] || '#RRGGBB'} />
-                              </div>
-                              <p className="text-[8px] text-slate-500 min-w-[88px] text-right">{parsedRgb ? formatRgbLabel(parsedRgb) : 'Invalid Hex'}</p>
+                    <div className="grid gap-2">
+                      {customMixBaseHexes.map((hex, index) => {
+                        const normalizedHex = normalizeHexColor(hex);
+                        const parsedRgb = hexToRgb(hex);
+                        return (
+                          <div key={`root-color-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
+                            <input type="color" value={normalizedHex || '#000000'} onChange={(e) => updateCustomMixBaseHex(index, e.target.value.toUpperCase())} className="w-9 h-9 rounded-lg border border-white p-0 shrink-0 cursor-pointer" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root {index + 1}</p>
+                              <input type="text" value={hex} onChange={(e) => updateCustomMixBaseHex(index, e.target.value)} className="w-full text-[10px] font-bold text-slate-700 bg-transparent outline-none uppercase" placeholder="#RRGGBB" />
                             </div>
-                          );
-                        })}
+                            <p className="text-[8px] text-slate-500 min-w-[88px] text-right">{parsedRgb ? formatRgbLabel(parsedRgb) : 'Invalid Hex'}</p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
+                      <div>
+                        <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Model Update</p>
+                        <p className={`text-[9px] font-black uppercase tracking-widest mt-1 ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
+                          {is3mfExportReady ? '3MF ready with these root colors' : 'Set 4 valid root colors to update/export'}
+                        </p>
                       </div>
+                      <button onClick={updateRootColors} disabled={!rootColorPreviewResult} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Update Root Colors</button>
                     </div>
                   </div>
-                  {colorMixAdvisorResult && (
+                  {rootColorPreviewResult && (
                     <div className="space-y-3 pt-2 border-t border-slate-100">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Current Evaluation</p>
-                          <p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.modeLabel}</p>
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Preview After Update</p>
+                          <p className="text-sm font-black text-slate-800">How the current layers will look with these 4 root colors</p>
                         </div>
                         <div className="flex flex-wrap gap-2 items-center">
-                          <button onClick={applyColorMixAdvisorResult} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase hover:bg-indigo-700 transition">Apply Evaluated Colors</button>
-                          {colorMixAdvisorResult.baseColors.map((rgb, index) => (
+                          {rootColorPreviewResult.baseColors.map((rgb, index) => (
                             <div key={`result-base-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-2.5 py-2">
                               <div className="w-6 h-6 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(rgb) }} />
                               <div>
-                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Base {index + 1}</p>
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root {index + 1}</p>
                                 <p className="text-[9px] font-bold text-slate-700">{rgbToHex(rgb)}</p>
                               </div>
                             </div>
@@ -2376,13 +2554,13 @@ const App = () => {
                         </div>
                       </div>
                       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Visible Layers</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.layerCount}</p></div>
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Max Error</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.maxError.toFixed(3)}</p></div>
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Avg Error</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.averageError.toFixed(3)}</p></div>
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Within {COLOR_MIX_GOOD_MATCH_THRESHOLD.toFixed(2)}</p><p className="text-sm font-black text-slate-800">{colorMixAdvisorResult.summary.withinThresholdCount} / {colorMixAdvisorResult.summary.layerCount}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Visible Layers</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.layerCount}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Max Error</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.maxError.toFixed(3)}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Avg Error</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.averageError.toFixed(3)}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Within {COLOR_MIX_GOOD_MATCH_THRESHOLD.toFixed(2)}</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.withinThresholdCount} / {rootColorPreviewResult.summary.layerCount}</p></div>
                       </div>
                       <div className="space-y-2">
-                        {colorMixAdvisorResult.layers.map((layer) => (
+                        {rootColorPreviewResult.layers.map((layer) => (
                           <div key={`mix-layer-${layer.key}`} className="rounded-[1.25rem] border border-slate-100 bg-white px-4 py-3">
                             <div className="flex flex-wrap items-center gap-3">
                               <div className="flex items-center gap-2 min-w-[132px]">
