@@ -1497,6 +1497,7 @@ const App = () => {
   const [isExporting3MF, setIsExporting3MF] = useState(false);
   const [isExportingBambu3MF, setIsExportingBambu3MF] = useState(false);
   const [isExportingOBJ, setIsExportingOBJ] = useState(false);
+  const [is3DExportMenuOpen, setIs3DExportMenuOpen] = useState(false);
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
@@ -2457,6 +2458,12 @@ const App = () => {
     setActiveTab(nextTab);
   }, [cancel3DLayerMoveMode, is3DLayerMoveMode]);
 
+  useEffect(() => {
+    if (activeTab !== '3d' || is3DLayerMoveMode) {
+      setIs3DExportMenuOpen(false);
+    }
+  }, [activeTab, is3DLayerMoveMode]);
+
   const applyLayerSort = useCallback((mode) => {
     if (mode === 'current' || !pixels) return;
     const nextLayerOrder = getSortedLayerOrder(layerOrder, pixels, mode);
@@ -2942,30 +2949,57 @@ const App = () => {
           )}
           {activeTab === '3d' && (
             <div className="h-full flex flex-col">
-              <div className="px-6 py-3 border-b border-slate-50 flex justify-between items-center gap-3 shrink-0">
-                <h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2 shrink-0"><BoxIcon className="text-indigo-600" size={18}/> 3D Preview</h2>
-                <div className="flex items-center gap-2 shrink-0">
-                  {is3DLayerMoveMode ? (
-                    <>
-                      <button onClick={cancel3DLayerMoveMode} className="flex items-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-slate-300 transition active:scale-95">Cancel</button>
-                      <button onClick={confirm3DLayerMoveMode} className="flex items-center gap-1 bg-indigo-600 text-white px-3 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-indigo-700 transition active:scale-95">Confirm</button>
-                    </>
-                  ) : (
-                    <button onClick={enter3DLayerMoveMode} className="flex items-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95">Move Layers</button>
-                  )}
-                  <button onClick={exportSTL} className="flex items-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> Export STL</button>
-                  <button onClick={exportOBJ} disabled={isExportingOBJ} className="flex items-center gap-2 bg-sky-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-sky-700 transition active:scale-95"><DownloadCloud size={14} /> {isExportingOBJ ? 'Building OBJ' : 'Export OBJ'}</button>
-                  <button onClick={export3MF} disabled={!is3mfExportReady || isExporting3MF} className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-700 transition active:scale-95"><DownloadCloud size={14} /> {isExporting3MF ? 'Building 3MF' : 'Export 3MF'}</button>
-                  <button onClick={exportBambu3MF} disabled={!is3mfExportReady || isExportingBambu3MF} className="flex items-center gap-2 bg-amber-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg disabled:opacity-30 disabled:cursor-not-allowed hover:bg-amber-600 transition active:scale-95"><DownloadCloud size={14} /> {isExportingBambu3MF ? 'Building Bambu 3MF' : 'Export Bambu 3MF'}</button>
+              <div className="px-4 sm:px-6 py-3 border-b border-slate-50 flex flex-col gap-3 shrink-0">
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                  <div className="min-w-0">
+                    <h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2 shrink-0"><BoxIcon className="text-indigo-600" size={18}/> 3D Preview</h2>
+                    <div className="pt-2">
+                      <p className={`text-[9px] font-black uppercase tracking-widest ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
+                        {is3mfExportReady ? '3MF ready' : 'Needs re-evaluation for 3MF export'}
+                      </p>
+                      <p className={`text-[8px] font-bold uppercase tracking-widest mt-1 ${isBambuQuantized ? 'text-amber-500' : 'text-emerald-600'}`}>
+                        {isBambuQuantized ? 'Bambu 3MF will quantize recipes to Root or 2-color mixes' : 'Bambu Compatible'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-stretch gap-2 sm:justify-end">
+                    {is3DLayerMoveMode ? (
+                      <>
+                        <button onClick={cancel3DLayerMoveMode} className="flex-1 sm:flex-none min-w-[112px] flex items-center justify-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-slate-300 transition active:scale-95">Cancel</button>
+                        <button onClick={confirm3DLayerMoveMode} className="flex-1 sm:flex-none min-w-[112px] flex items-center justify-center gap-1 bg-indigo-600 text-white px-3 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-indigo-700 transition active:scale-95">Confirm</button>
+                      </>
+                    ) : (
+                      <button onClick={enter3DLayerMoveMode} className="flex-1 sm:flex-none min-w-[132px] flex items-center justify-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95">Move Layers</button>
+                    )}
+                    <button onClick={exportSTL} className="flex-1 sm:flex-none min-w-[112px] flex items-center justify-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> STL</button>
+                    <div className="relative flex-1 sm:flex-none min-w-[56px]">
+                      <button
+                        onClick={() => setIs3DExportMenuOpen((open) => !open)}
+                        className="w-full h-full flex items-center justify-center gap-2 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95"
+                        aria-label="More export options"
+                        aria-expanded={is3DExportMenuOpen}
+                      >
+                        <MoreVertical size={16} />
+                      </button>
+                      {is3DExportMenuOpen && (
+                        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-30 w-[min(15rem,80vw)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur-md shadow-2xl p-2 flex flex-col gap-2">
+                          <button onClick={() => { setIs3DExportMenuOpen(false); exportOBJ(); }} disabled={isExportingOBJ} className="w-full flex items-center justify-between gap-3 bg-sky-50 text-sky-700 px-3 py-2.5 rounded-xl text-[9px] font-black disabled:opacity-30 disabled:cursor-not-allowed hover:bg-sky-100 transition">
+                            <span className="flex items-center gap-2"><DownloadCloud size={14} /> OBJ</span>
+                            <span className="text-[8px] text-sky-500">{isExportingOBJ ? 'Building...' : 'Export'}</span>
+                          </button>
+                          <button onClick={() => { setIs3DExportMenuOpen(false); export3MF(); }} disabled={!is3mfExportReady || isExporting3MF} className="w-full flex items-center justify-between gap-3 bg-indigo-50 text-indigo-700 px-3 py-2.5 rounded-xl text-[9px] font-black disabled:opacity-30 disabled:cursor-not-allowed hover:bg-indigo-100 transition">
+                            <span className="flex items-center gap-2"><DownloadCloud size={14} /> 3MF</span>
+                            <span className="text-[8px] text-indigo-500">{isExporting3MF ? 'Building...' : 'Export'}</span>
+                          </button>
+                          <button onClick={() => { setIs3DExportMenuOpen(false); exportBambu3MF(); }} disabled={!is3mfExportReady || isExportingBambu3MF} className="w-full flex items-center justify-between gap-3 bg-amber-50 text-amber-700 px-3 py-2.5 rounded-xl text-[9px] font-black disabled:opacity-30 disabled:cursor-not-allowed hover:bg-amber-100 transition">
+                            <span className="flex items-center gap-2"><DownloadCloud size={14} /> Bambu 3MF</span>
+                            <span className="text-[8px] text-amber-500">{isExportingBambu3MF ? 'Building...' : 'Export'}</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div className="px-6 pt-3">
-                <p className={`text-[9px] font-black uppercase tracking-widest ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
-                  {is3mfExportReady ? '3MF ready' : 'Needs re-evaluation for 3MF export'}
-                </p>
-                <p className={`text-[8px] font-bold uppercase tracking-widest mt-1 ${isBambuQuantized ? 'text-amber-500' : 'text-emerald-600'}`}>
-                  {isBambuQuantized ? 'Bambu 3MF will quantize recipes to Root or 2-color mixes' : 'Bambu Compatible'}
-                </p>
               </div>
               <div className="flex-1 relative bg-slate-50/50">
                 <div ref={threeRef} className="absolute inset-0" />
