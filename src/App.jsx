@@ -265,6 +265,15 @@ const build3mfMixMetadata = (advisorResult, meshGroups) => JSON.stringify({
     })),
 }, null, 2);
 
+const BambuFilamentSlotTokens = ['4', '8', '0C', '1C', '2C', '3C', '4C', '5C', '6C', '7C', '9C', 'AC', 'BC', 'CC', 'DC', 'EC', 'FC'];
+
+const getBambuSlotToken = (slotNumber) => {
+  if (slotNumber <= 0) return '4';
+  if (slotNumber <= BambuFilamentSlotTokens.length) return BambuFilamentSlotTokens[slotNumber - 1];
+  const nibble = Math.max(0, slotNumber - 3).toString(16).toUpperCase();
+  return `${nibble}C`;
+};
+
 const sanitizeObjName = (value) => String(value || 'layer')
   .replace(/[^a-zA-Z0-9_-]+/g, '_')
   .replace(/^_+|_+$/g, '') || 'layer';
@@ -307,23 +316,27 @@ const buildObjBundle = (meshGroups, baseName) => {
   };
 };
 
-const BambuPaintTokenPool = {
-  roots: ['8', '4', '0', 'C'],
-  mixed: ['4C', '0C', '5C', '6C', '7C', '1C', '2C', '3C', '9C', 'AC', 'BC', 'CC', 'DC', 'EC', 'FC'],
-};
-
 const formatBambuRatio = (ratio) => Number(ratio || 0).toFixed(4);
+
+const isSupportedBambuHalfMix = (recipeComponents = []) => recipeComponents.length === 2;
+
+const isExperimentalBambuRecipe = (recipeComponents = []) => (
+  recipeComponents.length > 2
+);
 
 const buildBambuFilamentPalette = (advisorResult) => {
   const baseEntries = advisorResult.baseColors.map((rgb, index) => ({
     key: `root:${index}`,
     kind: 'root',
-    token: BambuPaintTokenPool.roots[index] || `${index}`,
+    slotNumber: index + 1,
+    slotLabel: `Root ${index + 1}`,
     displayRgb: rgb,
     displayHex: rgbToHex(rgb),
     components: [],
     ratios: [],
+    recipeLabel: `Base ${index + 1} 100%`,
     filamentIndex: index + 1,
+    token: getBambuSlotToken(index + 1),
   }));
 
   const mixedEntryMap = new Map();
@@ -333,6 +346,7 @@ const buildBambuFilamentPalette = (advisorResult) => {
       .map(({ index, ratio }) => `${index + 1}:${formatBambuRatio(ratio)}`)
       .join('|');
     if (mixedEntryMap.has(recipeKey)) return;
+    const supportedHalfMix = isSupportedBambuHalfMix(layer.recipeComponents);
     mixedEntryMap.set(recipeKey, {
       key: recipeKey,
       kind: 'mixed',
@@ -340,13 +354,34 @@ const buildBambuFilamentPalette = (advisorResult) => {
       displayHex: rgbToHex(layer.mixedRgb),
       components: layer.recipeComponents.map(({ index }) => index + 1),
       ratios: layer.recipeComponents.map(({ ratio }) => formatBambuRatio(ratio)),
+      isExperimental: !supportedHalfMix,
     });
   });
 
-  const mixedEntries = Array.from(mixedEntryMap.values()).map((entry, index) => ({
+  const mixedEntries = Array.from(mixedEntryMap.values())
+    .sort((left, right) => (
+      getBambuRecipePriority(
+        left.components.map((component, componentIndex) => ({
+          index: component - 1,
+          ratio: Number(left.ratios[componentIndex] || 0),
+        })),
+      ) - getBambuRecipePriority(
+        right.components.map((component, componentIndex) => ({
+          index: component - 1,
+          ratio: Number(right.ratios[componentIndex] || 0),
+        })),
+      )
+      || left.components.length - right.components.length
+      || left.components.join(',').localeCompare(right.components.join(','))
+      || left.ratios.join(',').localeCompare(right.ratios.join(','))
+    ))
+    .map((entry, index) => ({
     ...entry,
-    token: BambuPaintTokenPool.mixed[index] || `${(index + 1).toString(16).toUpperCase()}C`,
+    slotNumber: baseEntries.length + index + 1,
+    slotLabel: `Root ${baseEntries.length + index + 1}`,
+    recipeLabel: formatMixRecipe(entry.components.map(({ index: componentIndex, ratio }) => ({ index: componentIndex, ratio: Number(ratio) }))),
     filamentIndex: baseEntries.length + index + 1,
+    token: getBambuSlotToken(baseEntries.length + index + 1),
   }));
 
   const byLayerKey = new Map();
@@ -378,16 +413,10 @@ const generatePseudoUuid = (seed) => {
 
 const collectBambuMeshGroups = (group, layerOrder, advisorLayers, filamentPalette) => (
   collect3mfMeshGroups(group, layerOrder, advisorLayers).map((meshGroup, index) => {
-    const zValues = meshGroup.vertices.map(([, , z]) => z);
-    const minZ = zValues.length ? Math.min(...zValues) : 0;
-    const maxZ = zValues.length ? Math.max(...zValues) : 0;
     const paletteEntry = filamentPalette.byLayerKey.get(meshGroup.layerKey) || filamentPalette.entries[0];
     return {
       ...meshGroup,
       objectId: index + 1,
-      vertices: meshGroup.vertices.map(([x, y, z]) => [x, y, z - minZ]),
-      minZ,
-      maxZ,
       bambuPaintToken: paletteEntry?.token || '8',
       bambuFilamentIndex: paletteEntry?.filamentIndex || 1,
       bambuPaletteEntry: paletteEntry || null,
@@ -395,75 +424,73 @@ const collectBambuMeshGroups = (group, layerOrder, advisorLayers, filamentPalett
   })
 );
 
-const buildBambuObjectModelXml = (meshGroups) => {
-  const objectXml = meshGroups.map((group) => {
-    const verticesXml = group.vertices
-      .map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}" />`)
-      .join('');
-    const trianglesXml = group.triangles
-      .map(([v1, v2, v3]) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" paint_color="${group.bambuPaintToken}" />`)
-      .join('');
-    return `<object id="${group.objectId}" p:UUID="${generatePseudoUuid(group.objectId)}" type="model"><mesh><vertices>${verticesXml}</vertices><triangles>${trianglesXml}</triangles></mesh></object>`;
-  }).join('');
+const buildBambuGenericModelXml = (meshGroups, metadata) => {
+  const allVertices = [];
+  const allTriangles = [];
+
+  meshGroups.forEach((group) => {
+    const vertexOffset = allVertices.length;
+    group.vertices.forEach((vertex) => allVertices.push(vertex));
+    group.triangles.forEach(([v1, v2, v3]) => {
+      allTriangles.push({
+        v1: v1 + vertexOffset,
+        v2: v2 + vertexOffset,
+        v3: v3 + vertexOffset,
+        paintColor: group.bambuPaintToken,
+      });
+    });
+  });
+
+  const verticesXml = allVertices
+    .map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}" />`)
+    .join('');
+  const trianglesXml = allTriangles
+    .map(({ v1, v2, v3, paintColor }) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" paint_color="${paintColor}" />`)
+    .join('');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">
+ <metadata name="Application">BambuStudio-02.06.00.51</metadata>
  <metadata name="BambuStudio:3mfVersion">1</metadata>
+ <metadata name="CreationDate">${escapeXml(metadata.exportDate)}</metadata>
+ <metadata name="ModificationDate">${escapeXml(metadata.exportDate)}</metadata>
+ <metadata name="Title">${escapeXml(metadata.projectName)}</metadata>
+ <metadata name="dotplate:mixMetadataPath">Metadata/dotplate-color-mixing.json</metadata>
+ <metadata name="dotplate:exportedAt">${escapeXml(metadata.exportedAt)}</metadata>
  <resources>
-  ${objectXml}
+  <object id="1" type="model">
+   <mesh>
+    <vertices>${verticesXml}</vertices>
+    <triangles>${trianglesXml}</triangles>
+   </mesh>
+  </object>
  </resources>
+ <build>
+  <item objectid="1" transform="1 0 0 0 1 0 0 0 1 90 90 1" printable="1"/>
+ </build>
 </model>`;
 };
 
-const buildBambuProjectModelXml = (meshGroups, metadata) => {
-  const compositeObjectId = meshGroups.length + 1;
-  const componentsXml = meshGroups.map((group) => {
-    const zOffset = Number(group.minZ || 0);
-    return `<component p:path="/3D/Objects/object_1.model" objectid="${group.objectId}" transform="1 0 0 0 1 0 0 0 1 0 0 ${zOffset}" />`;
-  }).join('');
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">
-<metadata name="Application">Dot Plate Pro</metadata>
-<metadata name="BambuStudio:3mfVersion">1</metadata>
-<metadata name="dotplate:mixMetadataPath">Metadata/dotplate-color-mixing.json</metadata>
-<metadata name="dotplate:exportedAt">${escapeXml(metadata.exportedAt)}</metadata>
-<resources>
-<object id="${compositeObjectId}" type="model"><components>${componentsXml}</components></object>
-</resources>
-<build><item objectid="${compositeObjectId}" /></build>
-</model>`;
-};
-
-const buildBambuModelRelationshipsXml = () => `<?xml version="1.0" encoding="UTF-8"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
-</Relationships>`;
-
-const buildBambuModelSettingsConfig = (meshGroups, metadata) => {
-  const compositeObjectId = meshGroups.length + 1;
-  const partsXml = meshGroups.map((group, index) => {
-    const zOffset = Number(group.minZ || 0);
-    return `<part id="${index + 1}" subtype="normal_part">
-      <metadata key="name" value="${escapeXml(group.label.replace(/\s+/g, '_'))}"/>
-      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 ${zOffset} 0 0 0 1"/>
-      <metadata key="source_file" value="${escapeXml(metadata.sourceFileName)}"/>
-      <metadata key="source_object_id" value="0"/>
-      <metadata key="source_volume_id" value="${index}"/>
-      <metadata key="source_offset_x" value="0"/>
-      <metadata key="source_offset_y" value="0"/>
-      <metadata key="source_offset_z" value="${zOffset}"/>
-      <mesh_stat face_count="${group.triangles.length}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
-    </part>`;
-  }).join('');
-
+const buildBambuGenericModelSettingsConfig = (meshGroups, metadata) => {
+  const totalFaceCount = meshGroups.reduce((sum, group) => sum + group.triangles.length, 0);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <config>
-  <object id="${compositeObjectId}">
-    <metadata key="name" value="DotPlatePro"/>
+  <object id="1">
+    <metadata key="name" value="${escapeXml(metadata.projectName)}"/>
     <metadata key="extruder" value="1"/>
-    <metadata face_count="${meshGroups.reduce((sum, group) => sum + group.triangles.length, 0)}"/>
-    ${partsXml}
+    <metadata face_count="${totalFaceCount}"/>
+    <part id="1" subtype="normal_part">
+      <metadata key="name" value="${escapeXml(metadata.sourceFileName)}"/>
+      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>
+      <metadata key="source_file" value="${escapeXml(metadata.sourceFileName)}"/>
+      <metadata key="source_object_id" value="0"/>
+      <metadata key="source_volume_id" value="0"/>
+      <metadata key="source_offset_x" value="0"/>
+      <metadata key="source_offset_y" value="0"/>
+      <metadata key="source_offset_z" value="1"/>
+      <metadata key="extruder" value="1"/>
+      <mesh_stat face_count="${totalFaceCount}" edges_fixed="0" degenerate_facets="0" facets_removed="0" facets_reversed="0" backwards_edges="0"/>
+    </part>
   </object>
   <plate>
     <metadata key="plater_id" value="1"/>
@@ -471,13 +498,13 @@ const buildBambuModelSettingsConfig = (meshGroups, metadata) => {
     <metadata key="locked" value="false"/>
     <metadata key="filament_map_mode" value="Auto For Flush"/>
     <model_instance>
-      <metadata key="object_id" value="${compositeObjectId}"/>
+      <metadata key="object_id" value="1"/>
       <metadata key="instance_id" value="0"/>
       <metadata key="identify_id" value="1370"/>
     </model_instance>
   </plate>
   <assemble>
-    <assemble_item object_id="${compositeObjectId}" instance_id="0" transform="1 0 0 0 1 0 0 0 1 90 90 0" offset="0 0 0" />
+    <assemble_item object_id="1" instance_id="0" transform="1 0 0 0 1 0 0 0 1 90 90 0" offset="0 0 0" />
   </assemble>
 </config>`;
 };
@@ -498,12 +525,15 @@ const buildBambuProjectSettingsConfig = (filamentPalette) => {
     filament_map_mode: 'Auto For Flush',
     filament_ids: filamentPalette.entries.map(() => 'GFA00'),
     filament_type: filamentPalette.entries.map(() => 'PLA'),
-    filament_vendor: filamentPalette.entries.map(() => 'Generic'),
+    filament_vendor: filamentPalette.entries.map(() => 'Bambu Lab'),
     filament_flow_ratio: filamentPalette.entries.map(() => '0.98'),
     filament_diameter: filamentPalette.entries.map(() => '1.75'),
     filament_cost: filamentPalette.entries.map(() => '24.99'),
     filament_density: filamentPalette.entries.map(() => '1.26'),
     filament_multi_colour_enable: filamentPalette.entries.map(() => '1'),
+    filament_self_index: filamentPalette.entries.map((_, index) => String(index + 1)),
+    filament_settings_id: filamentPalette.entries.map(() => 'Bambu PLA Basic @BBL A1M 0.2 nozzle'),
+    filament_printable: filamentPalette.entries.map(() => '3'),
     print_extruder_id: ['1'],
     printer_extruder_id: ['1'],
     wall_filament: '0',
@@ -512,12 +542,18 @@ const buildBambuProjectSettingsConfig = (filamentPalette) => {
     support_filament: '0',
     support_interface_filament: '0',
     single_extruder_multi_material: '1',
-    enable_mixed_color_sublayer: '1',
-    extruder_colour: filamentColour,
-    default_filament_colour: filamentColour,
-    default_filament_profile: filamentPalette.entries.map(() => 'Generic PLA'),
+    enable_mixed_color_sublayer: '0',
+    extruder_colour: ['#018001'],
+    default_filament_colour: filamentPalette.entries.map(() => ''),
+    default_filament_profile: ['Bambu PLA Basic @BBL A1M 0.2 nozzle'],
   };
   return JSON.stringify(baseJson, null, 4);
+};
+
+const getBambuCompatibilityLabel = (recipeComponents = []) => {
+  if (!recipeComponents.length || recipeComponents.length === 1) return 'Root';
+  if (isSupportedBambuHalfMix(recipeComponents)) return '2-color mix';
+  return 'Experimental';
 };
 
 const buildBambuFilamentSequenceJson = () => JSON.stringify({
@@ -550,6 +586,15 @@ const formatRgbLabel = (rgb) => `RGB(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
 
 const formatMixRecipe = (components) => components.map(({ index, ratio }) => `Base ${index + 1} ${Math.round(ratio * 100)}%`).join(' + ');
 
+const isRoot1BasedRecipe = (components = []) => components.some(({ index }) => index === 0);
+
+const getBambuRecipePriority = (components = []) => {
+  if (!components.length) return 100;
+  const includesRoot1 = isRoot1BasedRecipe(components);
+  if (components.length === 1) return includesRoot1 ? 0 : 10 + components[0].index;
+  return includesRoot1 ? 20 : 40;
+};
+
 const dedupeRgbList = (colors) => {
   const unique = [];
   const seen = new Set();
@@ -573,52 +618,46 @@ const suggestIdealMixBaseColors = (pixels, targetCount = COLOR_MIX_BASE_COUNT) =
   if (entries.length === 0) return [];
   if (entries.length <= targetCount) return entries.map((entry) => entry.rgb);
 
-  let centroids = entries.slice(0, targetCount).map((entry) => ({ ...entry.oklab }));
-  let clusterWeights = centroids.map(() => 0);
+  const candidateEntries = dedupeRgbList(entries.map((entry) => entry.rgb)).map((rgb) => {
+    const oklab = rgbToOklab(rgb);
+    const source = entries.find((entry) => rgbToHex(entry.rgb) === rgbToHex(rgb));
+    const chromaScore = Math.abs(oklab.a) + Math.abs(oklab.b);
+    const contrastScore = Math.abs(oklab.l - 0.5);
+    const weightScore = source ? Math.min(1, source.weight * 2.5) : 0.15;
+    return {
+      rgb,
+      oklab,
+      weight: source?.weight || 0,
+      accentScore: chromaScore * 1.6 + contrastScore * 0.35 + weightScore,
+    };
+  });
 
-  for (let iteration = 0; iteration < 8; iteration++) {
-    const accumulators = centroids.map(() => ({ weight: 0, l: 0, a: 0, b: 0 }));
+  const selected = [];
+  const pushIfPresent = (entry) => {
+    if (!entry) return;
+    if (selected.some((picked) => rgbToHex(picked.rgb) === rgbToHex(entry.rgb))) return;
+    selected.push(entry);
+  };
 
-    entries.forEach((entry) => {
-      let bestIndex = 0;
-      let bestDistance = Number.POSITIVE_INFINITY;
-      centroids.forEach((centroid, index) => {
-        const distance = getOklabDistance(entry.oklab, centroid);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          bestIndex = index;
-        }
-      });
+  pushIfPresent(candidateEntries.sort((left, right) => right.weight - left.weight)[0]);
 
-      const bucket = accumulators[bestIndex];
-      bucket.weight += entry.weight;
-      bucket.l += entry.oklab.l * entry.weight;
-      bucket.a += entry.oklab.a * entry.weight;
-      bucket.b += entry.oklab.b * entry.weight;
-    });
-
-    centroids = centroids.map((centroid, index) => {
-      const bucket = accumulators[index];
-      if (bucket.weight === 0) return centroid;
-      return {
-        l: bucket.l / bucket.weight,
-        a: bucket.a / bucket.weight,
-        b: bucket.b / bucket.weight,
-      };
-    });
-    clusterWeights = accumulators.map((bucket) => bucket.weight);
+  while (selected.length < targetCount) {
+    const next = candidateEntries
+      .filter((entry) => !selected.some((picked) => rgbToHex(picked.rgb) === rgbToHex(entry.rgb)))
+      .sort((left, right) => {
+        const leftDistance = selected.length === 0
+          ? left.accentScore
+          : Math.min(...selected.map((picked) => getOklabDistance(left.oklab, picked.oklab))) + left.accentScore * 0.6;
+        const rightDistance = selected.length === 0
+          ? right.accentScore
+          : Math.min(...selected.map((picked) => getOklabDistance(right.oklab, picked.oklab))) + right.accentScore * 0.6;
+        return rightDistance - leftDistance || right.accentScore - left.accentScore || right.weight - left.weight;
+      })[0];
+    if (!next) break;
+    selected.push(next);
   }
 
-  const suggested = centroids
-    .map((centroid, index) => ({ rgb: oklabToRgb(centroid), weight: clusterWeights[index] || 0 }))
-    .sort((left, right) => right.weight - left.weight)
-    .map((entry) => entry.rgb);
-
-  const deduped = dedupeRgbList(suggested);
-  if (deduped.length >= targetCount) return deduped.slice(0, targetCount);
-
-  const supplements = entries.map((entry) => entry.rgb).filter((rgb) => !deduped.some((candidate) => rgbToHex(candidate) === rgbToHex(rgb)));
-  return [...deduped, ...supplements].slice(0, targetCount);
+  return selected.map((entry) => entry.rgb).slice(0, targetCount);
 };
 
 const buildMixCandidates = (baseColors) => {
@@ -686,7 +725,15 @@ const buildColorMixAdvisorResult = (pixels, layerOrder, baseColors) => {
 
     candidates.forEach((candidate) => {
       const error = getOklabDistance(targetOklab, candidate.mixedOklab);
-      if (error < bestError) {
+      if (
+        error < bestError - 0.0001
+        || (
+          Math.abs(error - bestError) <= 0.01
+          && bestCandidate
+          && getBambuRecipePriority(candidate.components) < getBambuRecipePriority(bestCandidate.components)
+        )
+        || (!bestCandidate && Number.isFinite(error))
+      ) {
         bestError = error;
         bestCandidate = candidate;
       }
@@ -715,6 +762,93 @@ const buildColorMixAdvisorResult = (pixels, layerOrder, baseColors) => {
       maxError: Math.max(...errors),
       averageError: errors.reduce((sum, value) => sum + value, 0) / errors.length,
       withinThresholdCount: layers.filter((layer) => layer.error <= COLOR_MIX_GOOD_MATCH_THRESHOLD).length,
+    },
+  };
+};
+
+const buildBambuCompatibleCandidates = (baseColors) => {
+  const linearBaseColors = baseColors.map((rgb) => getLinearRgb(rgb));
+  const candidates = [];
+
+  const pushCandidate = (components, compatibilityKind) => {
+    const colors = components.map(({ index }) => linearBaseColors[index]);
+    const weights = components.map(({ ratio }) => ratio);
+    const linearRgb = mixLinearRgb(colors, weights);
+    const mixedRgb = linearRgb.map((channel) => linearToSrgb(channel));
+    candidates.push({
+      components,
+      mixedRgb,
+      mixedOklab: rgbToOklab(mixedRgb),
+      recipeLabel: formatMixRecipe(components),
+      compatibilityKind,
+    });
+  };
+
+  baseColors.forEach((_, index) => {
+    pushCandidate([{ index, ratio: 1 }], 'Root');
+  });
+
+  for (let left = 0; left < baseColors.length; left += 1) {
+    for (let right = left + 1; right < baseColors.length; right += 1) {
+      for (let step = 1; step < COLOR_MIX_RATIO_STEPS; step += 1) {
+        pushCandidate([
+          { index: left, ratio: step / COLOR_MIX_RATIO_STEPS },
+          { index: right, ratio: (COLOR_MIX_RATIO_STEPS - step) / COLOR_MIX_RATIO_STEPS },
+        ], '2-color mix');
+      }
+    }
+  }
+
+  return candidates;
+};
+
+const buildBambuCompatibilityResult = (pixels, layerOrder, baseColors) => {
+  if (!pixels || baseColors.length === 0) return null;
+  const colorStats = collectUniqueColorStats(pixels);
+  const candidates = buildBambuCompatibleCandidates(baseColors);
+  if (candidates.length === 0) return null;
+
+  const layers = layerOrder.filter((key) => colorStats.has(key)).map((key, index) => {
+    const { color, count } = colorStats.get(key);
+    const targetOklab = rgbToOklab(color);
+    let bestCandidate = null;
+    let bestError = Number.POSITIVE_INFINITY;
+
+    candidates.forEach((candidate) => {
+      const error = getOklabDistance(targetOklab, candidate.mixedOklab);
+      if (error < bestError) {
+        bestError = error;
+        bestCandidate = candidate;
+      }
+    });
+
+    return {
+      key,
+      layerNumber: index + 1,
+      targetRgb: color,
+      usageCount: count,
+      recipeLabel: bestCandidate.recipeLabel,
+      recipeComponents: bestCandidate.components,
+      mixedRgb: bestCandidate.mixedRgb,
+      error: bestError,
+      compatibilityKind: bestCandidate.compatibilityKind,
+      isBaseDerived: isRoot1BasedRecipe(bestCandidate.components),
+    };
+  });
+
+  if (layers.length === 0) return null;
+
+  const errors = layers.map((layer) => layer.error);
+  return {
+    baseColors,
+    layers,
+    summary: {
+      layerCount: layers.length,
+      maxError: Math.max(...errors),
+      averageError: errors.reduce((sum, value) => sum + value, 0) / errors.length,
+      rootCount: layers.filter((layer) => layer.compatibilityKind === 'Root').length,
+      twoColorMixCount: layers.filter((layer) => layer.compatibilityKind === '2-color mix').length,
+      baseDerivedCount: layers.filter((layer) => layer.isBaseDerived).length,
     },
   };
 };
@@ -1483,7 +1617,22 @@ const App = () => {
   const rootColorPreviewResult = pixels && hasValidRootColors
     ? buildColorMixAdvisorResult(pixels, layerOrder, parsedRootColors)
     : null;
+  const bambuCompatibilityResult = pixels && hasValidRootColors
+    ? buildBambuCompatibilityResult(pixels, layerOrder, parsedRootColors)
+    : null;
+  const appliedRootColorResult = bambuCompatibilityResult;
+  const bambuFilamentPalette = appliedRootColorResult
+    ? buildBambuFilamentPalette(appliedRootColorResult)
+    : null;
   const is3mfExportReady = Boolean(pixels && rootColorPreviewResult);
+  const isBambuQuantized = Boolean(
+    rootColorPreviewResult
+    && bambuCompatibilityResult
+    && rootColorPreviewResult.layers.some((layer, index) => {
+      const compatibleLayer = bambuCompatibilityResult.layers[index];
+      return compatibleLayer && compatibleLayer.recipeLabel !== layer.recipeLabel;
+    }),
+  );
 
   const applyMergedColorState = useCallback((mergedState) => {
     setPixels(mergedState.nextPixels);
@@ -1536,15 +1685,15 @@ const App = () => {
     if (!pixels) return;
     const suggestedColors = suggestIdealMixBaseColors(pixels, COLOR_MIX_BASE_COUNT);
     setCustomMixBaseHexes(Array.from({ length: COLOR_MIX_BASE_COUNT }, (_, index) => suggestedColors[index] ? rgbToHex(suggestedColors[index]) : ''));
-    setStatusMessage(suggestedColors.length ? `Loaded ${suggestedColors.length} root colors from the current model.` : 'No visible layer colors found.');
-  }, [pixels, layerOrder]);
+    setStatusMessage(suggestedColors.length ? `Loaded ${suggestedColors.length} accent-aware root colors from the current model.` : 'No visible layer colors found.');
+  }, [pixels]);
 
   const updateRootColors = useCallback(() => {
-    if (!pixels || !rootColorPreviewResult) {
+    if (!pixels || !bambuCompatibilityResult) {
       setStatusMessage('Please prepare 4 valid root colors first.');
       return;
     }
-    const appliedState = buildAppliedColorMixState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, rootColorPreviewResult);
+    const appliedState = buildAppliedColorMixState(pixels, layerOrder, layerHeightAdjustments, layerSmoothingSettings, bambuCompatibilityResult);
     if (!appliedState) {
       setStatusMessage('No root color update is available.');
       return;
@@ -1556,7 +1705,7 @@ const App = () => {
     setLayerSmoothingSettings(appliedState.nextLayerSmoothingSettings);
 
     const currentColorKey = JSON.stringify(currentColor);
-    const replacementLayer = rootColorPreviewResult.layers.find((layer) => layer.key === currentColorKey);
+    const replacementLayer = bambuCompatibilityResult.layers.find((layer) => layer.key === currentColorKey);
     if (replacementLayer) setCurrentColor(replacementLayer.mixedRgb);
 
     pushToHistory(appliedState.nextPixels, {
@@ -1564,8 +1713,10 @@ const App = () => {
       layerHeightAdjustments: appliedState.nextLayerHeightAdjustments,
       layerSmoothingSettings: appliedState.nextLayerSmoothingSettings,
     });
-    setStatusMessage('Updated the model using the current root colors.');
-  }, [currentColor, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory, rootColorPreviewResult]);
+    setStatusMessage(isBambuQuantized
+      ? 'Updated the model using Bambu-compatible root colors.'
+      : 'Updated the model using the current root colors.');
+  }, [bambuCompatibilityResult, currentColor, isBambuQuantized, layerHeightAdjustments, layerOrder, layerSmoothingSettings, pixels, pushToHistory]);
 
   const handleLayerColorChange = useCallback((sourceKey, nextHex) => {
     if (!pixels) return;
@@ -1996,8 +2147,12 @@ const App = () => {
     setIsExportingBambu3MF(true);
     setStatusMessage('Bambu 3MFを構築中...');
     try {
-      const filamentPalette = buildBambuFilamentPalette(rootColorPreviewResult);
-      const meshGroups = collectBambuMeshGroups(sceneRef.current, layerOrder, rootColorPreviewResult.layers, filamentPalette);
+      if (!bambuCompatibilityResult) {
+        setStatusMessage('Bambu compatibility data is unavailable.');
+        return;
+      }
+      const filamentPalette = buildBambuFilamentPalette(bambuCompatibilityResult);
+      const meshGroups = collectBambuMeshGroups(sceneRef.current, layerOrder, bambuCompatibilityResult.layers, filamentPalette);
       if (!meshGroups.length) {
         setStatusMessage('No mesh data available for Bambu 3MF export.');
         return;
@@ -2007,14 +2162,14 @@ const App = () => {
       const sourceFileName = `${timestamp}_3mf_${outputFileName || 'dotplate'}.3mf`;
       const metadata = {
         exportedAt: new Date().toISOString(),
+        exportDate: getFormattedDate('display').split(' ')[0].replace(/\//g, '-'),
         projectName: projectName || 'dotplate',
         sourceFileName,
       };
-      const topLevelModelXml = buildBambuProjectModelXml(meshGroups, metadata);
-      const objectModelXml = buildBambuObjectModelXml(meshGroups);
-      const modelSettingsConfig = buildBambuModelSettingsConfig(meshGroups, metadata);
+      const topLevelModelXml = buildBambuGenericModelXml(meshGroups, metadata);
+      const modelSettingsConfig = buildBambuGenericModelSettingsConfig(meshGroups, metadata);
       const projectSettingsConfig = buildBambuProjectSettingsConfig(filamentPalette);
-      const mixMetadataJson = build3mfMixMetadata(rootColorPreviewResult, meshGroups);
+      const mixMetadataJson = build3mfMixMetadata(bambuCompatibilityResult, meshGroups);
       const zip = new JSZip();
       zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -2028,8 +2183,6 @@ const App = () => {
   <Relationship Target="3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" />
 </Relationships>`);
       zip.folder('3D')?.file('3dmodel.model', topLevelModelXml);
-      zip.folder('3D')?.folder('_rels')?.file('3dmodel.model.rels', buildBambuModelRelationshipsXml());
-      zip.folder('3D')?.folder('Objects')?.file('object_1.model', objectModelXml);
       zip.folder('Metadata')?.file('project_settings.config', projectSettingsConfig);
       zip.folder('Metadata')?.file('model_settings.config', modelSettingsConfig);
       zip.folder('Metadata')?.file('filament_sequence.json', buildBambuFilamentSequenceJson());
@@ -2042,14 +2195,14 @@ const App = () => {
       link.download = `${timestamp}_bambu_3mf_${outputFileName || 'dotplate'}.3mf`;
       link.click();
       URL.revokeObjectURL(url);
-      setStatusMessage('Experimental Bambu 3MF export complete.');
+      setStatusMessage(isBambuQuantized ? 'Bambu 3MF export complete. Some recipes were quantized for compatibility.' : 'Bambu 3MF export complete.');
     } catch (error) {
       console.error(error);
       setStatusMessage('Bambu 3MF export failed.');
     } finally {
       setIsExportingBambu3MF(false);
     }
-  }, [isExportingBambu3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
+  }, [bambuCompatibilityResult, isBambuQuantized, isExportingBambu3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
 
   const exportImage = useCallback(async () => {
     if (!pixels || isExporting) return; setIsExporting(true); setStatusMessage("画像を構築中...");
@@ -2810,7 +2963,9 @@ const App = () => {
                 <p className={`text-[9px] font-black uppercase tracking-widest ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
                   {is3mfExportReady ? '3MF ready' : 'Needs re-evaluation for 3MF export'}
                 </p>
-                <p className="text-[8px] font-bold uppercase tracking-widest text-amber-600 mt-1">Bambu 3MF is experimental</p>
+                <p className={`text-[8px] font-bold uppercase tracking-widest mt-1 ${isBambuQuantized ? 'text-amber-500' : 'text-emerald-600'}`}>
+                  {isBambuQuantized ? 'Bambu 3MF will quantize recipes to Root or 2-color mixes' : 'Bambu Compatible'}
+                </p>
               </div>
               <div className="flex-1 relative bg-slate-50/50">
                 <div ref={threeRef} className="absolute inset-0" />
@@ -2875,7 +3030,7 @@ const App = () => {
                 </div>
                 <div className="bg-slate-50 p-5 rounded-[1.5rem] border border-slate-100 space-y-4 shadow-inner">
                   <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">Root Colors</p>
-                  <p className="text-[9px] text-slate-500 leading-relaxed">Get the 4 base filament colors for the current layer drawing, edit them, then update the model to the colors that would actually result from those 4 roots. The same 4 root colors are used for 3MF export.</p>
+                  <p className="text-[9px] text-slate-500 leading-relaxed">Get the 4 filament colors you actually have, then update the model to the closest Bambu-compatible result that can be printed with those roots. The same result is used for Bambu 3MF export.</p>
                   <div className="bg-white rounded-[1.25rem] border border-slate-100 p-4 space-y-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
@@ -2892,7 +3047,7 @@ const App = () => {
                           <div key={`root-color-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-slate-50 px-2.5 py-2">
                             <input type="color" value={normalizedHex || '#000000'} onChange={(e) => updateCustomMixBaseHex(index, e.target.value.toUpperCase())} className="w-9 h-9 rounded-lg border border-white p-0 shrink-0 cursor-pointer" />
                             <div className="flex-1 min-w-0">
-                              <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root {index + 1}</p>
+                              <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root {index + 1}{index === 0 ? ' (Base)' : ''}</p>
                               <input type="text" value={hex} onChange={(e) => updateCustomMixBaseHex(index, e.target.value)} className="w-full text-[10px] font-bold text-slate-700 bg-transparent outline-none uppercase" placeholder="#RRGGBB" />
                             </div>
                             <p className="text-[8px] text-slate-500 min-w-[88px] text-right">{parsedRgb ? formatRgbLabel(parsedRgb) : 'Invalid Hex'}</p>
@@ -2904,25 +3059,28 @@ const App = () => {
                       <div>
                         <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Model Update</p>
                         <p className={`text-[9px] font-black uppercase tracking-widest mt-1 ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
-                          {is3mfExportReady ? '3MF ready with these root colors' : 'Set 4 valid root colors to update/export'}
+                          {is3mfExportReady ? 'Bambu-ready root colors set' : 'Set 4 valid root colors to update/export'}
                         </p>
                       </div>
-                      <button onClick={updateRootColors} disabled={!rootColorPreviewResult} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Update Root Colors</button>
+                      <button onClick={updateRootColors} disabled={!appliedRootColorResult} className="bg-slate-900 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition">Update Root Colors</button>
                     </div>
                   </div>
-                  {rootColorPreviewResult && (
+                  {appliedRootColorResult && (
                     <div className="space-y-3 pt-2 border-t border-slate-100">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
                           <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Preview After Update</p>
-                          <p className="text-sm font-black text-slate-800">How the current layers will look with these 4 root colors</p>
+                          <p className="text-sm font-black text-slate-800">How the current layers will update for Bambu-compatible printing with these 4 root colors</p>
+                          {isBambuQuantized && (
+                            <p className="mt-1 text-[9px] font-bold text-amber-600">Some colors were quantized to Root or 2-color mixes so the printed result matches the Bambu export.</p>
+                          )}
                         </div>
                         <div className="flex flex-wrap gap-2 items-center">
-                          {rootColorPreviewResult.baseColors.map((rgb, index) => (
+                          {appliedRootColorResult.baseColors.map((rgb, index) => (
                             <div key={`result-base-${index}`} className="flex items-center gap-2 rounded-xl border border-slate-100 bg-white px-2.5 py-2">
                               <div className="w-6 h-6 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(rgb) }} />
                               <div>
-                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root {index + 1}</p>
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root {index + 1}{index === 0 ? ' (Base)' : ''}</p>
                                 <p className="text-[9px] font-bold text-slate-700">{rgbToHex(rgb)}</p>
                               </div>
                             </div>
@@ -2930,13 +3088,50 @@ const App = () => {
                         </div>
                       </div>
                       <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Visible Layers</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.layerCount}</p></div>
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Max Error</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.maxError.toFixed(3)}</p></div>
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Avg Error</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.averageError.toFixed(3)}</p></div>
-                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Within {COLOR_MIX_GOOD_MATCH_THRESHOLD.toFixed(2)}</p><p className="text-sm font-black text-slate-800">{rootColorPreviewResult.summary.withinThresholdCount} / {rootColorPreviewResult.summary.layerCount}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Visible Layers</p><p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.layerCount}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Max Error</p><p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.maxError.toFixed(3)}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Avg Error</p><p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.averageError.toFixed(3)}</p></div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2"><p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Within {COLOR_MIX_GOOD_MATCH_THRESHOLD.toFixed(2)}</p><p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.withinThresholdCount ?? appliedRootColorResult.summary.layerCount} / {appliedRootColorResult.summary.layerCount}</p></div>
                       </div>
+                      <div className="grid gap-2 sm:grid-cols-3">
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2">
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Root Layers</p>
+                          <p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.rootCount}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2">
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">2-Color Mix Layers</p>
+                          <p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.twoColorMixCount}</p>
+                        </div>
+                        <div className="rounded-xl border border-slate-100 bg-white px-3 py-2">
+                          <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Bambu Avg Error</p>
+                          <p className="text-sm font-black text-slate-800">{appliedRootColorResult.summary.averageError.toFixed(3)}</p>
+                        </div>
+                      </div>
+                      {bambuFilamentPalette && (
+                        <div className="space-y-2">
+                          <div>
+                            <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Bambu Palette</p>
+                            <p className="text-[9px] text-slate-500">Root 1 is treated as the base model color. Root 2-4 add accents, and mixed slots start at Root 5 as the shared source of truth for preview, model update, and Bambu 3MF export.</p>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                            {bambuFilamentPalette.entries.map((entry) => (
+                              <div key={`bambu-slot-${entry.slotNumber}`} className="rounded-xl border border-slate-100 bg-white px-3 py-2 flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: entry.displayHex }} />
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">{entry.slotLabel}{entry.slotNumber === 1 ? ' (Base)' : ''}</p>
+                                  <p className="text-[9px] font-bold text-slate-700 truncate">{entry.recipeLabel}</p>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Token</p>
+                                  <p className="text-[9px] font-black text-indigo-600">{entry.token}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       <div className="space-y-2">
-                        {rootColorPreviewResult.layers.map((layer) => (
+                        {appliedRootColorResult.layers.map((layer) => (
                           <div key={`mix-layer-${layer.key}`} className="rounded-[1.25rem] border border-slate-100 bg-white px-4 py-3">
                             <div className="flex flex-wrap items-center gap-3">
                               <div className="flex items-center gap-2 min-w-[132px]">
@@ -2947,9 +3142,26 @@ const App = () => {
                                 </div>
                               </div>
                               <div className="flex-1 min-w-[160px]">
-                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Best Recipe</p>
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Bambu Recipe</p>
                                 <p className="text-[9px] font-bold text-slate-700">{layer.recipeLabel}</p>
+                                {'compatibilityKind' in layer && (
+                                  <p className="mt-1 inline-flex rounded-full bg-indigo-50 text-indigo-600 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest">
+                                    {layer.compatibilityKind}
+                                  </p>
+                                )}
+                                {layer.isBaseDerived && (
+                                  <p className="mt-1 ml-1 inline-flex rounded-full bg-emerald-50 text-emerald-600 px-2 py-0.5 text-[8px] font-black uppercase tracking-widest">
+                                    Base-derived
+                                  </p>
+                                )}
                               </div>
+                              {bambuFilamentPalette?.byLayerKey.get(layer.key) && (
+                                <div className="min-w-[108px]">
+                                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Assigned Slot</p>
+                                  <p className="text-[9px] font-black text-slate-700">{bambuFilamentPalette.byLayerKey.get(layer.key).slotLabel}</p>
+                                  <p className="text-[8px] text-indigo-600 font-black">Token {bambuFilamentPalette.byLayerKey.get(layer.key).token}</p>
+                                </div>
+                              )}
                               <div className="flex items-center gap-2 min-w-[132px]">
                                 <div className="w-8 h-8 rounded-lg border border-white shadow-inner shrink-0" style={{ backgroundColor: rgbToHex(layer.mixedRgb) }} />
                                 <div>
