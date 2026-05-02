@@ -176,23 +176,30 @@ const collect3mfMeshGroups = (group, layerOrder, advisorLayers) => {
     const target = meshGroups.get(layerKey);
     const indexAttribute = child.geometry.getIndex();
     const position = new THREE.Vector3();
-    const triangleBuffer = [];
+    const vertexOffset = target.vertices.length;
 
-    const pushVertex = (vertexIndex) => {
-      position.fromBufferAttribute(positionAttribute, vertexIndex);
+    for (let i = 0; i < positionAttribute.count; i++) {
+      position.fromBufferAttribute(positionAttribute, i);
       position.applyMatrix4(child.matrixWorld);
       target.vertices.push([position.x, position.y, position.z]);
-      triangleBuffer.push(target.vertices.length - 1);
-      if (triangleBuffer.length === 3) {
-        target.triangles.push([...triangleBuffer]);
-        triangleBuffer.length = 0;
-      }
-    };
+    }
 
     if (indexAttribute) {
-      for (let i = 0; i < indexAttribute.count; i++) pushVertex(indexAttribute.getX(i));
+      for (let i = 0; i < indexAttribute.count; i += 3) {
+        target.triangles.push([
+          vertexOffset + indexAttribute.getX(i),
+          vertexOffset + indexAttribute.getX(i + 1),
+          vertexOffset + indexAttribute.getX(i + 2),
+        ]);
+      }
     } else {
-      for (let i = 0; i < positionAttribute.count; i++) pushVertex(i);
+      for (let i = 0; i < positionAttribute.count; i += 3) {
+        target.triangles.push([
+          vertexOffset + i,
+          vertexOffset + i + 1,
+          vertexOffset + i + 2,
+        ]);
+      }
     }
   });
 
@@ -263,6 +270,27 @@ const build3mfMixMetadata = (advisorResult, meshGroups) => JSON.stringify({
       error: group.advisorLayer.error,
       usageCount: group.advisorLayer.usageCount,
     })),
+}, null, 2);
+
+const buildAdvisorMixMetadata = (advisorResult) => JSON.stringify({
+  version: 1,
+  exportedAt: new Date().toISOString(),
+  baseColors: advisorResult.baseColors.map((rgb, index) => ({
+    index: index + 1,
+    hex: rgbToHex(rgb),
+    rgb,
+  })),
+  layers: advisorResult.layers.map((layer) => ({
+    layerKey: layer.key,
+    label: `Layer ${layer.layerNumber}`,
+    targetRgb: layer.targetRgb,
+    mixedRgb: layer.mixedRgb,
+    mixedHex: rgbToHex(layer.mixedRgb),
+    recipeLabel: layer.recipeLabel,
+    recipeComponents: layer.recipeComponents || [],
+    error: layer.error,
+    usageCount: layer.usageCount,
+  })),
 }, null, 2);
 
 const BambuFilamentSlotTokens = ['4', '8', '0C', '1C', '2C', '3C', '4C', '5C', '6C', '7C', '9C', 'AC', 'BC', 'CC', 'DC', 'EC', 'FC'];
@@ -405,46 +433,155 @@ const buildBambuFilamentPalette = (advisorResult) => {
   };
 };
 
+const getBambuPixelWorldBounds = (x, y, width, height, dotSize, topZ, bottomZ = 0) => {
+  const left = (x - width / 2) * dotSize;
+  const right = left + dotSize;
+  const top = (height / 2 - y) * dotSize;
+  const bottom = top - dotSize;
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    topZ,
+    bottomZ,
+    centerX: left + dotSize / 2,
+    centerY: bottom + dotSize / 2,
+    centerZ: bottomZ + (topZ - bottomZ) / 2,
+  };
+};
+
+const buildBambuPaintMeshData = (pixels, dotSize, totalThickness, advisorResult, filamentPalette) => {
+  if (!pixels || !advisorResult || !filamentPalette) return null;
+  const height = pixels.length;
+  const width = pixels[0]?.length || 0;
+  if (!width || !height) return null;
+
+  const advisorLayerMap = new Map(advisorResult.layers.map((layer) => [layer.key, layer]));
+  const baseEntry = filamentPalette.entries[0];
+  const vertexMap = new Map();
+  const vertices = [];
+  const triangles = [];
+  const previewInstances = new Map();
+
+  const addVertex = (x, y, z) => {
+    const key = `${x.toFixed(5)}|${y.toFixed(5)}|${z.toFixed(5)}`;
+    if (vertexMap.has(key)) return vertexMap.get(key);
+    const index = vertices.length;
+    vertices.push([x, y, z]);
+    vertexMap.set(key, index);
+    return index;
+  };
+
+  const pushFace = (points, paintColor) => {
+    const indices = points.map(([x, y, z]) => addVertex(x, y, z));
+    triangles.push({ v1: indices[0], v2: indices[1], v3: indices[2], paintColor });
+    triangles.push({ v1: indices[0], v2: indices[2], v3: indices[3], paintColor });
+  };
+
+  const isFilled = (x, y) => (
+    y >= 0
+    && y < height
+    && x >= 0
+    && x < width
+    && JSON.stringify(pixels[y][x]) !== TRANSPARENT_KEY
+  );
+
+  pixels.forEach((row, y) => row.forEach((pixel, x) => {
+    const layerKey = JSON.stringify(pixel);
+    if (layerKey === TRANSPARENT_KEY) return;
+    const advisorLayer = advisorLayerMap.get(layerKey);
+    const paletteEntry = filamentPalette.byLayerKey.get(layerKey) || baseEntry;
+    const token = paletteEntry?.token || baseEntry?.token || '4';
+    const displayRgb = advisorLayer?.mixedRgb || paletteEntry?.displayRgb || pixel;
+    if (!previewInstances.has(token)) {
+      previewInstances.set(token, {
+        token,
+        slotNumber: paletteEntry?.slotNumber || 1,
+        displayRgb,
+        positions: [],
+      });
+    }
+
+    const bounds = getBambuPixelWorldBounds(x, y, width, height, dotSize, totalThickness, 0);
+    previewInstances.get(token).positions.push([
+      bounds.centerX,
+      bounds.centerY,
+      bounds.centerZ,
+    ]);
+
+    const baseToken = baseEntry?.token || token;
+    const {
+      left, right, top, bottom, topZ, bottomZ,
+    } = bounds;
+
+    pushFace([
+      [left, top, topZ],
+      [left, bottom, topZ],
+      [right, bottom, topZ],
+      [right, top, topZ],
+    ], token);
+
+    pushFace([
+      [left, top, bottomZ],
+      [right, top, bottomZ],
+      [right, bottom, bottomZ],
+      [left, bottom, bottomZ],
+    ], baseToken);
+
+    if (!isFilled(x, y - 1)) {
+      pushFace([
+        [left, top, bottomZ],
+        [left, top, topZ],
+        [right, top, topZ],
+        [right, top, bottomZ],
+      ], baseToken);
+    }
+    if (!isFilled(x, y + 1)) {
+      pushFace([
+        [left, bottom, bottomZ],
+        [right, bottom, bottomZ],
+        [right, bottom, topZ],
+        [left, bottom, topZ],
+      ], baseToken);
+    }
+    if (!isFilled(x - 1, y)) {
+      pushFace([
+        [left, bottom, bottomZ],
+        [left, bottom, topZ],
+        [left, top, topZ],
+        [left, top, bottomZ],
+      ], baseToken);
+    }
+    if (!isFilled(x + 1, y)) {
+      pushFace([
+        [right, bottom, bottomZ],
+        [right, top, bottomZ],
+        [right, top, topZ],
+        [right, bottom, topZ],
+      ], baseToken);
+    }
+  }));
+
+  return {
+    vertices,
+    triangles,
+    faceCount: triangles.length,
+    previewInstances: Array.from(previewInstances.values()).sort((left, right) => left.slotNumber - right.slotNumber),
+  };
+};
+
 const generatePseudoUuid = (seed) => {
   const normalized = seed.toString(16).padStart(8, '0').slice(-8);
   const suffix = `${(seed * 7919).toString(16)}${(seed * 104729).toString(16)}`.padEnd(12, '0').slice(0, 12);
   return `${normalized}-81cb-4c03-9d28-${suffix}`;
 };
 
-const collectBambuMeshGroups = (group, layerOrder, advisorLayers, filamentPalette) => (
-  collect3mfMeshGroups(group, layerOrder, advisorLayers).map((meshGroup, index) => {
-    const paletteEntry = filamentPalette.byLayerKey.get(meshGroup.layerKey) || filamentPalette.entries[0];
-    return {
-      ...meshGroup,
-      objectId: index + 1,
-      bambuPaintToken: paletteEntry?.token || '8',
-      bambuFilamentIndex: paletteEntry?.filamentIndex || 1,
-      bambuPaletteEntry: paletteEntry || null,
-    };
-  })
-);
-
-const buildBambuGenericModelXml = (meshGroups, metadata) => {
-  const allVertices = [];
-  const allTriangles = [];
-
-  meshGroups.forEach((group) => {
-    const vertexOffset = allVertices.length;
-    group.vertices.forEach((vertex) => allVertices.push(vertex));
-    group.triangles.forEach(([v1, v2, v3]) => {
-      allTriangles.push({
-        v1: v1 + vertexOffset,
-        v2: v2 + vertexOffset,
-        v3: v3 + vertexOffset,
-        paintColor: group.bambuPaintToken,
-      });
-    });
-  });
-
-  const verticesXml = allVertices
+const buildBambuGenericModelXml = (meshData, metadata) => {
+  const verticesXml = meshData.vertices
     .map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}" />`)
     .join('');
-  const trianglesXml = allTriangles
+  const trianglesXml = meshData.triangles
     .map(({ v1, v2, v3, paintColor }) => `<triangle v1="${v1}" v2="${v2}" v3="${v3}" paint_color="${paintColor}" />`)
     .join('');
 
@@ -471,8 +608,8 @@ const buildBambuGenericModelXml = (meshGroups, metadata) => {
 </model>`;
 };
 
-const buildBambuGenericModelSettingsConfig = (meshGroups, metadata) => {
-  const totalFaceCount = meshGroups.reduce((sum, group) => sum + group.triangles.length, 0);
+const buildBambuGenericModelSettingsConfig = (meshData, metadata) => {
+  const totalFaceCount = meshData.faceCount;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <config>
   <object id="1">
@@ -1498,6 +1635,7 @@ const App = () => {
   const [isExportingBambu3MF, setIsExportingBambu3MF] = useState(false);
   const [isExportingOBJ, setIsExportingOBJ] = useState(false);
   const [is3DExportMenuOpen, setIs3DExportMenuOpen] = useState(false);
+  const [threeViewMode, setThreeViewMode] = useState('stack');
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
@@ -2135,10 +2273,6 @@ const App = () => {
   }, [isExporting3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
 
   const exportBambu3MF = useCallback(async () => {
-    if (!sceneRef.current) {
-      setStatusMessage('No Bambu 3MF export source is available.');
-      return;
-    }
     if (!rootColorPreviewResult) {
       setStatusMessage('Please prepare 4 valid root colors before exporting Bambu 3MF.');
       return;
@@ -2153,8 +2287,14 @@ const App = () => {
         return;
       }
       const filamentPalette = buildBambuFilamentPalette(bambuCompatibilityResult);
-      const meshGroups = collectBambuMeshGroups(sceneRef.current, layerOrder, bambuCompatibilityResult.layers, filamentPalette);
-      if (!meshGroups.length) {
+      const paintMeshData = buildBambuPaintMeshData(
+        pixels,
+        dotSize,
+        Math.max(0.2, baseThickness + layerThickness),
+        bambuCompatibilityResult,
+        filamentPalette,
+      );
+      if (!paintMeshData || !paintMeshData.vertices.length || !paintMeshData.triangles.length) {
         setStatusMessage('No mesh data available for Bambu 3MF export.');
         return;
       }
@@ -2167,10 +2307,10 @@ const App = () => {
         projectName: projectName || 'dotplate',
         sourceFileName,
       };
-      const topLevelModelXml = buildBambuGenericModelXml(meshGroups, metadata);
-      const modelSettingsConfig = buildBambuGenericModelSettingsConfig(meshGroups, metadata);
+      const topLevelModelXml = buildBambuGenericModelXml(paintMeshData, metadata);
+      const modelSettingsConfig = buildBambuGenericModelSettingsConfig(paintMeshData, metadata);
       const projectSettingsConfig = buildBambuProjectSettingsConfig(filamentPalette);
-      const mixMetadataJson = build3mfMixMetadata(bambuCompatibilityResult, meshGroups);
+      const mixMetadataJson = buildAdvisorMixMetadata(bambuCompatibilityResult);
       const zip = new JSZip();
       zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -2203,7 +2343,7 @@ const App = () => {
     } finally {
       setIsExportingBambu3MF(false);
     }
-  }, [bambuCompatibilityResult, isBambuQuantized, isExportingBambu3MF, layerOrder, outputFileName, projectName, rootColorPreviewResult]);
+  }, [bambuCompatibilityResult, baseThickness, dotSize, isBambuQuantized, isExportingBambu3MF, layerThickness, outputFileName, pixels, projectName, rootColorPreviewResult]);
 
   const exportImage = useCallback(async () => {
     if (!pixels || isExporting) return; setIsExporting(true); setStatusMessage("画像を構築中...");
@@ -2464,6 +2604,12 @@ const App = () => {
     }
   }, [activeTab, is3DLayerMoveMode]);
 
+  useEffect(() => {
+    if (threeViewMode === 'bambu-paint' && is3DLayerMoveMode) {
+      cancel3DLayerMoveMode();
+    }
+  }, [cancel3DLayerMoveMode, is3DLayerMoveMode, threeViewMode]);
+
   const applyLayerSort = useCallback((mode) => {
     if (mode === 'current' || !pixels) return;
     const nextLayerOrder = getSortedLayerOrder(layerOrder, pixels, mode);
@@ -2505,12 +2651,12 @@ const App = () => {
       container.appendChild(renderer.domElement); const controls = new OrbitControls(camera, renderer.domElement);
       renderer.domElement.style.cursor = 'grab';
       scene.add(new THREE.AmbientLight(0xffffff, 0.6)); const light = new THREE.DirectionalLight(0xffffff, 0.8); light.position.set(200, 400, 200); scene.add(light);
-      const group = new THREE.Group(); const h = pixels.length; const w = pixels[0].length;
+      const stackGroup = new THREE.Group(); const h = pixels.length; const w = pixels[0].length;
       const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2(); const selectableMeshes = [];
       if (baseThickness > 0) {
         const baseGeo = new THREE.BoxGeometry(w * dotSize, h * dotSize, baseThickness);
         const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshLambertMaterial({ color: 0xdddddd }));
-        baseMesh.position.set(0, 0, baseThickness / 2); group.add(baseMesh);
+        baseMesh.position.set(0, 0, baseThickness / 2); stackGroup.add(baseMesh);
       }
       let cz = baseThickness;
       displayLayerOrder.forEach((cs, li) => {
@@ -2554,12 +2700,39 @@ const App = () => {
               emissive: isSelectedLayer ? new THREE.Color(0xffffff) : new THREE.Color(0x000000),
               emissiveIntensity: isSelectedLayer ? 0.22 : 0,
             });
-            const mesh = new THREE.Mesh(geom, mat); mesh.position.z = cz - zMinus; mesh.userData.layerKey = cs; group.add(mesh); selectableMeshes.push(mesh);
+            const mesh = new THREE.Mesh(geom, mat); mesh.position.z = cz - zMinus; mesh.userData.layerKey = cs; stackGroup.add(mesh); selectableMeshes.push(mesh);
           });
         }
         cz += (layerThickness + zPlus);
       });
-      scene.add(group); sceneRef.current = group; const box = new THREE.Box3().setFromObject(group); const center = box.getCenter(new THREE.Vector3());
+      const bambuPreviewGroup = new THREE.Group();
+      if (bambuCompatibilityResult && bambuFilamentPalette) {
+        const previewData = buildBambuPaintMeshData(
+          pixels,
+          dotSize,
+          Math.max(0.2, baseThickness + layerThickness),
+          bambuCompatibilityResult,
+          bambuFilamentPalette,
+        );
+        if (previewData) {
+          previewData.previewInstances.forEach((entry) => {
+            if (!entry.positions.length) return;
+            const geometry = new THREE.BoxGeometry(dotSize, dotSize, Math.max(0.2, baseThickness + layerThickness));
+            const material = new THREE.MeshLambertMaterial({
+              color: new THREE.Color(`rgb(${entry.displayRgb[0]},${entry.displayRgb[1]},${entry.displayRgb[2]})`),
+            });
+            const instancedMesh = new THREE.InstancedMesh(geometry, material, entry.positions.length);
+            entry.positions.forEach(([x, y, z], instanceIndex) => {
+              const matrix = new THREE.Matrix4().makeTranslation(x, y, z);
+              instancedMesh.setMatrixAt(instanceIndex, matrix);
+            });
+            instancedMesh.instanceMatrix.needsUpdate = true;
+            bambuPreviewGroup.add(instancedMesh);
+          });
+        }
+      }
+      const visibleGroup = threeViewMode === 'bambu-paint' ? bambuPreviewGroup : stackGroup;
+      scene.add(visibleGroup); sceneRef.current = stackGroup; const box = new THREE.Box3().setFromObject(visibleGroup); const center = box.getCenter(new THREE.Vector3());
       if (threeCameraPositionRef.current && threeControlsTargetRef.current) {
         camera.position.copy(threeCameraPositionRef.current);
         controls.target.copy(threeControlsTargetRef.current);
@@ -2599,7 +2772,7 @@ const App = () => {
       const handleControlsEnd = () => { renderer.domElement.style.cursor = 'grab'; };
       controls.addEventListener('start', handleControlsStart);
       controls.addEventListener('end', handleControlsEnd);
-      if (is3DLayerMoveMode) {
+      if (is3DLayerMoveMode && threeViewMode === 'stack') {
         renderer.domElement.addEventListener('pointerdown', handlePointerDown);
         renderer.domElement.addEventListener('pointermove', handlePointerMove);
         renderer.domElement.addEventListener('pointerup', handlePointerUp);
@@ -2612,7 +2785,7 @@ const App = () => {
       };
       animate();
       return () => {
-        if (is3DLayerMoveMode) {
+        if (is3DLayerMoveMode && threeViewMode === 'stack') {
           renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
           renderer.domElement.removeEventListener('pointermove', handlePointerMove);
           renderer.domElement.removeEventListener('pointerup', handlePointerUp);
@@ -2626,7 +2799,7 @@ const App = () => {
         while (container.firstChild) container.removeChild(container.firstChild);
       };
     }
-  }, [activeTab, pixels, dotSize, layerThickness, baseThickness, layerOrder, layerHeightAdjustments, layerSmoothingSettings, selected3DLayer, draft3DLayerOrder, is3DLayerMoveMode]);
+  }, [activeTab, pixels, dotSize, layerThickness, baseThickness, layerOrder, layerHeightAdjustments, layerSmoothingSettings, selected3DLayer, draft3DLayerOrder, is3DLayerMoveMode, threeViewMode, bambuCompatibilityResult, bambuFilamentPalette]);
 
   const selected3DLayerIndex = selected3DLayer ? (is3DLayerMoveMode ? draft3DLayerOrder.indexOf(selected3DLayer) : layerOrder.indexOf(selected3DLayer)) : -1;
   const selected3DLayerColor = selected3DLayerIndex >= 0 ? JSON.parse(selected3DLayer) : null;
@@ -2952,13 +3125,40 @@ const App = () => {
               <div className="px-4 sm:px-6 py-3 border-b border-slate-50 flex flex-col gap-3 shrink-0">
                 <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                   <div className="min-w-0">
-                    <h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2 shrink-0"><BoxIcon className="text-indigo-600" size={18}/> 3D Preview</h2>
+                    <div className="flex flex-col gap-2">
+                      <h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2 shrink-0"><BoxIcon className="text-indigo-600" size={18}/> 3D Preview</h2>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => setThreeViewMode('stack')}
+                          className={`px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest transition ${
+                            threeViewMode === 'stack'
+                              ? 'bg-indigo-600 text-white shadow-lg'
+                              : 'bg-white text-slate-500 border border-slate-200 hover:border-indigo-300 hover:text-indigo-600'
+                          }`}
+                        >
+                          Layer Stack
+                        </button>
+                        <button
+                          onClick={() => setThreeViewMode('bambu-paint')}
+                          className={`px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest transition ${
+                            threeViewMode === 'bambu-paint'
+                              ? 'bg-amber-500 text-white shadow-lg'
+                              : 'bg-white text-slate-500 border border-slate-200 hover:border-amber-300 hover:text-amber-600'
+                          }`}
+                        >
+                          Bambu Paint
+                        </button>
+                      </div>
+                    </div>
                     <div className="pt-2">
                       <p className={`text-[9px] font-black uppercase tracking-widest ${is3mfExportReady ? 'text-emerald-600' : 'text-amber-600'}`}>
                         {is3mfExportReady ? '3MF ready' : 'Needs re-evaluation for 3MF export'}
                       </p>
                       <p className={`text-[8px] font-bold uppercase tracking-widest mt-1 ${isBambuQuantized ? 'text-amber-500' : 'text-emerald-600'}`}>
                         {isBambuQuantized ? 'Bambu 3MF will quantize recipes to Root or 2-color mixes' : 'Bambu Compatible'}
+                      </p>
+                      <p className="text-[8px] font-bold uppercase tracking-widest mt-1 text-slate-400">
+                        {threeViewMode === 'bambu-paint' ? 'Viewing printable solid with painted top faces' : 'Viewing stacked layer geometry'}
                       </p>
                     </div>
                   </div>
@@ -2969,7 +3169,7 @@ const App = () => {
                         <button onClick={confirm3DLayerMoveMode} className="flex-1 sm:flex-none min-w-[112px] flex items-center justify-center gap-1 bg-indigo-600 text-white px-3 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-indigo-700 transition active:scale-95">Confirm</button>
                       </>
                     ) : (
-                      <button onClick={enter3DLayerMoveMode} className="flex-1 sm:flex-none min-w-[132px] flex items-center justify-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95">Move Layers</button>
+                      <button onClick={enter3DLayerMoveMode} disabled={threeViewMode !== 'stack'} className="flex-1 sm:flex-none min-w-[132px] flex items-center justify-center gap-1 bg-white text-slate-600 px-3 py-2 rounded-xl text-[9px] font-black shadow-sm border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed">Move Layers</button>
                     )}
                     <button onClick={exportSTL} className="flex-1 sm:flex-none min-w-[112px] flex items-center justify-center gap-2 bg-emerald-500 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg hover:bg-emerald-600 transition active:scale-95"><Download size={14} /> STL</button>
                     <div className="relative flex-1 sm:flex-none min-w-[56px]">
