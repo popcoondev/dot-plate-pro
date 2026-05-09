@@ -1794,7 +1794,9 @@ const App = () => {
   const [history, setHistory] = useState({ stack: [], step: -1 });
   const [tool, setTool] = useState('hand'); const [currentColor, setCurrentColor] = useState([255, 0, 0]);
   const [brushSize, setBrushSize] = useState(1); const [zoom, setZoom] = useState(1.0);
-  const [pipZoom, setPipZoom] = useState(1.0); const [isTransparentMode, setIsTransparentMode] = useState(false);
+  const [pipZoom, setPipZoom] = useState(1.0); const [originalViewMode, setOriginalViewMode] = useState('split'); const [originalOverlayOpacity, setOriginalOverlayOpacity] = useState(0.35);
+  const [isOriginalOverlayControlsMinimized, setIsOriginalOverlayControlsMinimized] = useState(false);
+  const [originalOverlayOffset, setOriginalOverlayOffset] = useState({ x: 0, y: 0 }); const [isTransparentMode, setIsTransparentMode] = useState(false);
   const [showOriginal, setShowOriginal] = useState(false); const [showGrid, setShowGrid] = useState(false);
   const [useVirtualPad, setUseVirtualPad] = useState(false); const [isCanvasLocked, setIsCanvasLocked] = useState(false);
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 }); const [isPlotting, setIsPlotting] = useState(false);
@@ -1840,7 +1842,8 @@ const App = () => {
   const threeCameraPositionRef = useRef(null); const threeControlsTargetRef = useRef(null);
   const threePointerStateRef = useRef({ active: false, moved: false, x: 0, y: 0 });
   const dragStartRef = useRef({ x: 0, y: 0, scrollLeft: 0, scrollTop: 0 }); const pinchZoomRef = useRef({ active: false, startDistance: 0, startZoom: 1, anchorX: 0, anchorY: 0, midpointX: 0, midpointY: 0 });
-  const originalDragRef = useRef({ active: false, x: 0, y: 0, scrollLeft: 0, scrollTop: 0 });
+  const originalDragRef = useRef({ active: false, x: 0, y: 0, offsetX: 0, offsetY: 0 });
+  const originalPinchRef = useRef({ active: false, startDistance: 0, startZoom: 1, midpointX: 0, midpointY: 0, offsetX: 0, offsetY: 0 });
   const lastTrackpadPosRef = useRef({ x: 0, y: 0 }); const cursorSubPixelRef = useRef({ x: 0, y: 0 }); const zoomRef = useRef(zoom);
   const safariGestureScaleRef = useRef(1);
   const layerRowRefs = useRef({});
@@ -1854,6 +1857,13 @@ const App = () => {
   useEffect(() => { layerOrderRef.current = layerOrder; }, [layerOrder]);
   useEffect(() => { layerHeightAdjustmentsRef.current = layerHeightAdjustments; }, [layerHeightAdjustments]);
   useEffect(() => { layerSmoothingSettingsRef.current = layerSmoothingSettings; }, [layerSmoothingSettings]);
+  useEffect(() => {
+    setPipZoom(1.0);
+    setOriginalOverlayOpacity(0.35);
+    setOriginalOverlayOffset({ x: 0, y: 0 });
+    setOriginalViewMode('split');
+    setIsOriginalOverlayControlsMinimized(false);
+  }, [sourceImage]);
   useEffect(() => { if (!projectName && !isLoadingRef.current) { const def = getFormattedDate("compact"); setProjectName(def); setOutputFileName(def); } }, []);
   const handleProjectNameChange = (val) => { setProjectName(val); if (outputFileName === projectName || !outputFileName) setOutputFileName(val); };
   const centerCanvas = useCallback(() => {
@@ -2792,23 +2802,60 @@ const App = () => {
     resetPinchZoom();
   };
   const startOriginalImageDrag = (e) => {
-    const container = originalImageContainerRef.current;
-    if (!container) return;
-    const cx = e.touches ? e.touches[0].clientX : e.clientX;
-    const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    originalDragRef.current = { active: true, x: cx, y: cy, scrollLeft: container.scrollLeft, scrollTop: container.scrollTop };
+    if (e.touches && e.touches.length === 2) {
+      const [first, second] = e.touches;
+      const midpointX = (first.clientX + second.clientX) / 2;
+      const midpointY = (first.clientY + second.clientY) / 2;
+      const distance = Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY);
+      originalPinchRef.current = {
+        active: true,
+        startDistance: distance,
+        startZoom: pipZoom,
+        midpointX,
+        midpointY,
+        offsetX: originalOverlayOffset.x,
+        offsetY: originalOverlayOffset.y,
+      };
+      originalDragRef.current.active = false;
+      return;
+    }
+    const point = e.touches ? e.touches[0] : e;
+    originalDragRef.current = {
+      active: true,
+      x: point.clientX,
+      y: point.clientY,
+      offsetX: originalOverlayOffset.x,
+      offsetY: originalOverlayOffset.y,
+    };
   };
   const moveOriginalImageDrag = (e) => {
+    if (e.touches && e.touches.length === 2 && originalPinchRef.current.active) {
+      e.preventDefault();
+      const [first, second] = e.touches;
+      const midpointX = (first.clientX + second.clientX) / 2;
+      const midpointY = (first.clientY + second.clientY) / 2;
+      const distance = Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY);
+      const zoomScale = distance / Math.max(1, originalPinchRef.current.startDistance);
+      const nextZoom = Math.max(0.25, Math.min(8, originalPinchRef.current.startZoom * zoomScale));
+      setPipZoom(nextZoom);
+      setOriginalOverlayOffset({
+        x: originalPinchRef.current.offsetX + (midpointX - originalPinchRef.current.midpointX),
+        y: originalPinchRef.current.offsetY + (midpointY - originalPinchRef.current.midpointY),
+      });
+      return;
+    }
     if (!originalDragRef.current.active) return;
-    const container = originalImageContainerRef.current;
-    if (!container) return;
     if (e.touches) e.preventDefault();
-    const cx = e.touches ? e.touches[0].clientX : e.clientX;
-    const cy = e.touches ? e.touches[0].clientY : e.clientY;
-    container.scrollLeft = originalDragRef.current.scrollLeft - (cx - originalDragRef.current.x);
-    container.scrollTop = originalDragRef.current.scrollTop - (cy - originalDragRef.current.y);
+    const point = e.touches ? e.touches[0] : e;
+    setOriginalOverlayOffset({
+      x: originalDragRef.current.offsetX + (point.clientX - originalDragRef.current.x),
+      y: originalDragRef.current.offsetY + (point.clientY - originalDragRef.current.y),
+    });
   };
-  const stopOriginalImageDrag = () => { originalDragRef.current.active = false; };
+  const stopOriginalImageDrag = () => {
+    originalDragRef.current.active = false;
+    originalPinchRef.current.active = false;
+  };
   const handleTrackpadStart = (e) => { e.preventDefault(); const cx = e.touches ? e.touches[0].clientX : e.clientX; const cy = e.touches ? e.touches[0].clientY : e.clientY; lastTrackpadPosRef.current = { x: cx, y: cy }; isDrawingRef.current = true; };
   const handleTrackpadMove = (e) => {
     if (!isDrawingRef.current) return; e.preventDefault();
@@ -3327,7 +3374,7 @@ const App = () => {
                   </>
                 )}
               </div>
-              <div className={`flex-1 flex ${showOriginal ? 'flex-col lg:flex-row' : 'flex-col'} overflow-hidden relative`}>
+              <div className={`flex-1 flex ${showOriginal && originalViewMode === 'split' ? 'flex-col lg:flex-row' : 'flex-col'} overflow-hidden relative`}>
                 <div ref={scrollContainerRef} className={`flex-1 relative bg-slate-50/30 custom-scrollbar ${tool === 'hand' && !useVirtualPad ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`} style={{ overflow: isCanvasLocked ? 'hidden' : 'auto', touchAction: 'none', overscrollBehavior: 'contain' }} onMouseDown={startDrawingNormal} onMouseMove={drawMoveNormal} onMouseUp={stopDrawingNormal} onMouseLeave={stopDrawingNormal} onTouchStart={startDrawingNormal} onTouchMove={drawMoveNormal} onTouchEnd={stopDrawingNormal}>
                   {!pixels ? (
                     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4">
@@ -3336,7 +3383,39 @@ const App = () => {
                       </div>
                     </div>
                   ) : (
-                    <div ref={canvasWrapperRef} className="p-[50%] inline-flex items-center justify-center min-w-full min-h-full"><canvas ref={editorCanvasRef} className="shadow-2xl rounded-sm bg-white" style={{ imageRendering: 'pixelated' }} /></div>
+                    <div ref={canvasWrapperRef} className="p-[50%] inline-flex items-center justify-center min-w-full min-h-full relative">
+                      <canvas ref={editorCanvasRef} className="shadow-2xl rounded-sm bg-white" style={{ imageRendering: 'pixelated' }} />
+                      {showOriginal && sourceImage && originalViewMode === 'overlay' && (
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                          <div
+                            className="relative pointer-events-none select-none touch-none"
+                            style={{
+                              width: editorCanvasRef.current?.clientWidth || 0,
+                              height: editorCanvasRef.current?.clientHeight || 0,
+                            }}
+                          >
+                            <img
+                              src={sourceImage}
+                              alt="Original overlay"
+                              draggable={false}
+                              className="absolute inset-0 w-full h-full object-contain pointer-events-auto cursor-move active:cursor-grabbing"
+                              style={{
+                                opacity: originalOverlayOpacity,
+                                transform: `translate(${originalOverlayOffset.x}px, ${originalOverlayOffset.y}px) scale(${pipZoom})`,
+                                transformOrigin: 'center center',
+                              }}
+                              onMouseDown={startOriginalImageDrag}
+                              onMouseMove={moveOriginalImageDrag}
+                              onMouseUp={stopOriginalImageDrag}
+                              onMouseLeave={stopOriginalImageDrag}
+                              onTouchStart={startOriginalImageDrag}
+                              onTouchMove={moveOriginalImageDrag}
+                              onTouchEnd={stopOriginalImageDrag}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   )}
                   {useVirtualPad && pixels && (
                     <div className="sticky inset-0 pointer-events-none z-30 h-full w-full">
@@ -3383,12 +3462,90 @@ const App = () => {
                     <button onClick={() => setIsCanvasLocked(!isCanvasLocked)} className={`p-2.5 rounded-xl transition-all shadow-lg border ${isCanvasLocked ? 'bg-indigo-600 text-white border-indigo-700' : 'bg-white/50 backdrop-blur-md text-slate-700 border-white/20'}`}>{isCanvasLocked ? <Lock size={16} /> : <Unlock size={16} />}</button>
                   </div>
                 )}
-                {showOriginal && sourceImage && (
-                  <div ref={originalImageContainerRef} className="flex-1 relative overflow-auto bg-slate-100/50 border-t border-slate-100 custom-scrollbar text-center cursor-grab active:cursor-grabbing" style={{ touchAction: 'none' }} onMouseDown={startOriginalImageDrag} onMouseMove={moveOriginalImageDrag} onMouseUp={stopOriginalImageDrag} onMouseLeave={stopOriginalImageDrag} onTouchStart={startOriginalImageDrag} onTouchMove={moveOriginalImageDrag} onTouchEnd={stopOriginalImageDrag}>
-                    <div className="p-8 min-h-full min-w-full flex items-center justify-center"><img src={sourceImage} style={{ width: `${Math.max(1, 100 * pipZoom)}%`, height: 'auto', maxWidth: 'none' }} className="pointer-events-none shadow-2xl rounded-lg" alt="Reference" /></div>
-                    <div className="absolute top-4 left-4 bg-slate-900/80 text-white text-[8px] px-2 py-1 font-black rounded-lg backdrop-blur-md pointer-events-none uppercase tracking-widest">Original Image</div>
+                {showOriginal && sourceImage && originalViewMode === 'overlay' && (
+                  <div className="absolute top-4 left-4 z-50 pointer-events-auto flex flex-col gap-2 bg-white/90 backdrop-blur-md shadow-xl rounded-2xl px-3 py-3 border border-white/40 min-w-[180px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1 rounded-full bg-slate-100 p-1">
+                        <button
+                          onClick={() => setOriginalViewMode('overlay')}
+                          className={`px-2.5 py-1 rounded-full text-[8px] font-black uppercase tracking-widest transition ${originalViewMode === 'overlay' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}
+                        >
+                          Overlay
+                        </button>
+                        <button
+                          onClick={() => setOriginalViewMode('split')}
+                          className={`px-2.5 py-1 rounded-full text-[8px] font-black uppercase tracking-widest transition ${originalViewMode === 'split' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}
+                        >
+                          Split
+                        </button>
+                      </div>
+                      <button
+                        onClick={() => setIsOriginalOverlayControlsMinimized(v => !v)}
+                        className="p-1.5 rounded-full text-slate-500 hover:text-indigo-600 transition"
+                      >
+                        {isOriginalOverlayControlsMinimized ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                      </button>
+                    </div>
+                    {!isOriginalOverlayControlsMinimized && (
+                      <>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Original Overlay</span>
+                          <span className="text-[9px] font-black text-slate-700">{Math.round(originalOverlayOpacity * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="0.9"
+                          step="0.05"
+                          value={originalOverlayOpacity}
+                          onChange={(e) => setOriginalOverlayOpacity(parseFloat(e.target.value))}
+                          className="w-full accent-indigo-600 h-1 appearance-none bg-slate-100 rounded-full"
+                        />
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Zoom</span>
+                          <div className="flex items-center gap-1 bg-slate-50 rounded-full px-1.5 py-1 border border-slate-100">
+                            <button onClick={() => setPipZoom(z => Math.max(0.25, z - 0.1))} className="p-1 text-slate-500 hover:text-indigo-600 active:scale-90 transition"><Minus size={12}/></button>
+                            <span className="text-[9px] font-black min-w-[32px] text-center text-slate-700">{Math.round(pipZoom * 100)}%</span>
+                            <button onClick={() => setPipZoom(z => Math.min(8, z + 0.1))} className="p-1 text-slate-500 hover:text-indigo-600 active:scale-90 transition"><Plus size={12}/></button>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => { setPipZoom(1.0); setOriginalOverlayOpacity(0.35); setOriginalOverlayOffset({ x: 0, y: 0 }); }}
+                          className="text-[8px] font-black uppercase tracking-widest text-indigo-600 hover:text-indigo-700 transition text-left"
+                        >
+                          Reset Overlay
+                        </button>
+                        <p className="text-[8px] text-slate-400 leading-relaxed">
+                          Drag the overlay image itself to move it. Pinch on mobile to zoom and pan the original image.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+                {showOriginal && sourceImage && originalViewMode === 'split' && (
+                  <div ref={originalImageContainerRef} className="flex-1 relative overflow-auto bg-slate-100/50 border-t border-slate-100 lg:border-t-0 lg:border-l custom-scrollbar text-center cursor-grab active:cursor-grabbing" style={{ touchAction: 'none' }} onMouseDown={startOriginalImageDrag} onMouseMove={moveOriginalImageDrag} onMouseUp={stopOriginalImageDrag} onMouseLeave={stopOriginalImageDrag} onTouchStart={startOriginalImageDrag} onTouchMove={moveOriginalImageDrag} onTouchEnd={stopOriginalImageDrag}>
+                    <div className="absolute top-4 left-4 z-50 pointer-events-auto flex items-center gap-1 rounded-full bg-white/90 backdrop-blur-md p-1 border border-white/40 shadow-lg">
+                      <button
+                        onClick={() => setOriginalViewMode('overlay')}
+                        className={`px-2.5 py-1 rounded-full text-[8px] font-black uppercase tracking-widest transition ${originalViewMode === 'overlay' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500'}`}
+                      >
+                        Overlay
+                      </button>
+                      <button
+                        onClick={() => setOriginalViewMode('split')}
+                        className={`px-2.5 py-1 rounded-full text-[8px] font-black uppercase tracking-widest transition ${originalViewMode === 'split' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-500'}`}
+                      >
+                        Split
+                      </button>
+                    </div>
+                    <div className="p-8 min-h-full min-w-full flex items-center justify-center">
+                      <img src={sourceImage} style={{ width: `${Math.max(1, 100 * pipZoom)}%`, height: 'auto', maxWidth: 'none' }} className="pointer-events-none shadow-2xl rounded-lg" alt="Reference" />
+                    </div>
+                    <div className="absolute top-16 left-4 bg-slate-900/80 text-white text-[8px] px-2 py-1 font-black rounded-lg backdrop-blur-md pointer-events-none uppercase tracking-widest">Original Image</div>
                     <div className="absolute bottom-20 right-4 z-50 pointer-events-auto flex items-center gap-1 bg-white/85 backdrop-blur-md shadow-xl rounded-2xl px-1.5 py-1 border border-white">
-                       <button onClick={(e) => {e.stopPropagation(); setPipZoom(z => Math.max(0.1, z - 0.1))}} className="p-2 text-slate-600 hover:text-indigo-600 active:scale-90 transition"><Minus size={14}/></button><span className="text-[9px] font-black w-8 text-center text-slate-700">{Math.round(pipZoom*100)}%</span><button onClick={(e) => {e.stopPropagation(); setPipZoom(z => Math.min(10, z + 0.1))}} className="p-2 text-slate-600 hover:text-indigo-600 active:scale-90 transition"><Plus size={14}/></button>
+                      <button onClick={(e) => { e.stopPropagation(); setPipZoom(z => Math.max(0.25, z - 0.1)); }} className="p-2 text-slate-600 hover:text-indigo-600 active:scale-90 transition"><Minus size={14}/></button>
+                      <span className="text-[9px] font-black w-8 text-center text-slate-700">{Math.round(pipZoom*100)}%</span>
+                      <button onClick={(e) => { e.stopPropagation(); setPipZoom(z => Math.min(8, z + 0.1)); }} className="p-2 text-slate-600 hover:text-indigo-600 active:scale-90 transition"><Plus size={14}/></button>
                     </div>
                   </div>
                 )}
