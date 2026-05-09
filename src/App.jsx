@@ -1784,6 +1784,7 @@ const NavItem = ({ id, icon: Icon, label, isActive, onClick }) => (
 
 const App = () => {
   const [activeTab, setActiveTab] = useState('editor'); const [gridSize, setGridSize] = useState(32);
+  const [modelDimensionsMm, setModelDimensionsMm] = useState({ width: 0, height: 0, depth: 0 });
   const [projectName, setProjectName] = useState(""); const [outputFileName, setOutputFileName] = useState("");
   const [author, setAuthor] = useState(""); const [createdAt, setCreatedAt] = useState("");
   const [originalFilePath, setOriginalFilePath] = useState("");
@@ -3103,6 +3104,12 @@ const App = () => {
       }
       const visibleGroup = threeViewMode === 'bambu-paint' ? bambuPreviewGroup : stackGroup;
       scene.add(visibleGroup); sceneRef.current = stackGroup; const box = new THREE.Box3().setFromObject(visibleGroup); const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      setModelDimensionsMm({
+        width: Number(size.x.toFixed(1)),
+        height: Number(size.y.toFixed(1)),
+        depth: Number(size.z.toFixed(1)),
+      });
       if (threeCameraPositionRef.current && threeControlsTargetRef.current) {
         camera.position.copy(threeCameraPositionRef.current);
         controls.target.copy(threeControlsTargetRef.current);
@@ -3551,11 +3558,25 @@ const App = () => {
                       <p className={`text-[8px] font-bold uppercase tracking-widest mt-1 ${isBambuQuantized ? 'text-amber-500' : 'text-emerald-600'}`}>
                         {isBambuQuantized ? 'Bambu 3MF will quantize recipes to Root or 2-color mixes' : 'Bambu Compatible'}
                       </p>
-                      <p className="text-[8px] font-bold uppercase tracking-widest mt-1 text-slate-400">
-                        {threeViewMode === 'bambu-paint' ? 'Viewing printable solid with painted top faces' : 'Viewing stacked layer geometry'}
-                      </p>
-                    </div>
-                  </div>
+      <p className="text-[8px] font-bold uppercase tracking-widest mt-1 text-slate-400">
+        {threeViewMode === 'bambu-paint' ? 'Viewing printable solid with painted top faces' : 'Viewing stacked layer geometry'}
+      </p>
+      <div className="mt-3 inline-flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white/80 px-3 py-2 shadow-sm">
+        <span className="text-[8px] font-black uppercase tracking-widest text-slate-400">Model Size</span>
+        <span className="text-[10px] font-black text-slate-700">
+          W {modelDimensionsMm.width.toFixed(1)}mm
+        </span>
+        <span className="text-[10px] font-black text-slate-300">/</span>
+        <span className="text-[10px] font-black text-slate-700">
+          H {modelDimensionsMm.height.toFixed(1)}mm
+        </span>
+        <span className="text-[10px] font-black text-slate-300">/</span>
+        <span className="text-[10px] font-black text-slate-700">
+          D {modelDimensionsMm.depth.toFixed(1)}mm
+        </span>
+      </div>
+    </div>
+  </div>
                   <div className="flex flex-wrap items-stretch gap-2 sm:justify-end">
                     {is3DLayerMoveMode ? (
                       <>
