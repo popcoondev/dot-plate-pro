@@ -30,6 +30,7 @@ import {
   Square,
   Copy,
   Scissors,
+  Check,
   ClipboardPaste,
   FileJson,
   FolderOpen,
@@ -38,6 +39,7 @@ import {
   Clock,
   FileText,
   Circle,
+  Eraser,
   ChevronUp,
   ChevronDown,
   Lock,
@@ -125,6 +127,124 @@ const normalizeHexColor = (value) => {
   if (/^[0-9a-fA-F]{3}$/.test(raw)) return `#${raw.split('').map((char) => char + char).join('').toUpperCase()}`;
   if (/^[0-9a-fA-F]{6}$/.test(raw)) return `#${raw.toUpperCase()}`;
   return null;
+};
+
+const createBooleanMask = (width, height, initialValue = false) =>
+  Array.from({ length: height }, () => Array.from({ length: width }, () => initialValue));
+
+const cloneBooleanMask = (mask) => mask.map((row) => [...row]);
+
+const getConnectedComponent = (pixels, startX, startY, visited) => {
+  const height = pixels.length;
+  const width = pixels[0].length;
+  const targetKey = JSON.stringify(pixels[startY][startX]);
+  const queue = [[startX, startY]];
+  const component = [];
+  visited[startY][startX] = true;
+
+  while (queue.length) {
+    const [x, y] = queue.shift();
+    component.push([x, y]);
+    const neighbors = [
+      [x + 1, y],
+      [x - 1, y],
+      [x, y + 1],
+      [x, y - 1],
+    ];
+    neighbors.forEach(([nx, ny]) => {
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+      if (visited[ny][nx]) return;
+      if (JSON.stringify(pixels[ny][nx]) !== targetKey) return;
+      visited[ny][nx] = true;
+      queue.push([nx, ny]);
+    });
+  }
+
+  return component;
+};
+
+const buildInitialBackgroundRemovalMask = (pixels) => {
+  if (!pixels?.length || !pixels[0]?.length) return null;
+  const height = pixels.length;
+  const width = pixels[0].length;
+  const borderCounts = new Map();
+  const countBorderKey = (color) => {
+    const key = JSON.stringify(color);
+    borderCounts.set(key, (borderCounts.get(key) || 0) + 1);
+  };
+
+  for (let x = 0; x < width; x++) {
+    countBorderKey(pixels[0][x]);
+    countBorderKey(pixels[height - 1][x]);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    countBorderKey(pixels[y][0]);
+    countBorderKey(pixels[y][width - 1]);
+  }
+
+  const sortedBorderKeys = Array.from(borderCounts.entries())
+    .sort((left, right) => right[1] - left[1])
+    .map(([key]) => key);
+  const backgroundKeys = new Set(sortedBorderKeys.slice(0, 2));
+  backgroundKeys.add(TRANSPARENT_KEY);
+
+  const removalMask = createBooleanMask(width, height, false);
+  const queue = [];
+  const enqueueBackgroundSeed = (x, y) => {
+    const key = JSON.stringify(pixels[y][x]);
+    if (!backgroundKeys.has(key) || removalMask[y][x]) return;
+    removalMask[y][x] = true;
+    queue.push([x, y]);
+  };
+
+  for (let x = 0; x < width; x++) {
+    enqueueBackgroundSeed(x, 0);
+    enqueueBackgroundSeed(x, height - 1);
+  }
+  for (let y = 1; y < height - 1; y++) {
+    enqueueBackgroundSeed(0, y);
+    enqueueBackgroundSeed(width - 1, y);
+  }
+
+  while (queue.length) {
+    const [x, y] = queue.shift();
+    const neighbors = [
+      [x + 1, y],
+      [x - 1, y],
+      [x, y + 1],
+      [x, y - 1],
+    ];
+    neighbors.forEach(([nx, ny]) => {
+      if (nx < 0 || ny < 0 || nx >= width || ny >= height) return;
+      if (removalMask[ny][nx]) return;
+      const key = JSON.stringify(pixels[ny][nx]);
+      if (!backgroundKeys.has(key)) return;
+      removalMask[ny][nx] = true;
+      queue.push([nx, ny]);
+    });
+  }
+
+  const protectedVisited = createBooleanMask(width, height, false);
+  let largestComponent = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (removalMask[y][x]) continue;
+      if (protectedVisited[y][x]) continue;
+      const component = getConnectedComponent(pixels, x, y, protectedVisited);
+      if (component.length > largestComponent.length) largestComponent = component;
+    }
+  }
+
+  if (largestComponent.length) {
+    const keepSet = new Set(largestComponent.map(([x, y]) => `${x},${y}`));
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (keepSet.has(`${x},${y}`)) removalMask[y][x] = false;
+      }
+    }
+  }
+
+  return removalMask;
 };
 
 const escapeXml = (value) => String(value)
@@ -1802,6 +1922,8 @@ const App = () => {
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 }); const [isPlotting, setIsPlotting] = useState(false);
   const [selection, setSelection] = useState(null); const [clipboard, setClipboard] = useState(null);
   const [movingSelection, setMovingSelection] = useState(null);
+  const [backgroundRemovalMask, setBackgroundRemovalMask] = useState(null);
+  const [backgroundRemovalEditTool, setBackgroundRemovalEditTool] = useState('pen');
   const [layerOrder, setLayerOrder] = useState([]); const [layerHeightAdjustments, setLayerHeightAdjustments] = useState({});
   const [layerSmoothingSettings, setLayerSmoothingSettings] = useState({});
   const [showConfirmModal, setShowConfirmModal] = useState(false); const [showCanvasAdjustModal, setShowCanvasAdjustModal] = useState(false); const [isExporting, setIsExporting] = useState(false); 
@@ -1891,6 +2013,48 @@ const App = () => {
     });
   }, []);
 
+  const cancelBackgroundRemoval = useCallback((message = '背景除去をキャンセルしました') => {
+    setBackgroundRemovalMask(null);
+    setBackgroundRemovalEditTool('pen');
+    setStatusMessage(message);
+  }, []);
+
+  const startBackgroundRemoval = useCallback(() => {
+    if (!pixelsRef.current) return;
+    const nextMask = buildInitialBackgroundRemovalMask(pixelsRef.current);
+    setBackgroundRemovalMask(nextMask);
+    setBackgroundRemovalEditTool('pen');
+    setSelection(null);
+    setMovingSelection(null);
+    setTool('bgRemove');
+    setStatusMessage('背景除去モード: ハイライト部分を編集して Apply してください');
+  }, []);
+
+  const updateBackgroundRemovalMaskAtPoint = useCallback((mask, x, y, shouldRemove) => {
+    if (!mask?.length) return mask;
+    const height = mask.length;
+    const width = mask[0].length;
+    const radius = Math.max(0, (brushSize - 1) / 2);
+    const nextMask = cloneBooleanMask(mask);
+    for (let dy = -Math.floor(radius); dy <= Math.ceil(radius); dy++) {
+      for (let dx = -Math.floor(radius); dx <= Math.ceil(radius); dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+        if (brushSize > 1 && Math.sqrt(dx * dx + dy * dy) > brushSize / 2) continue;
+        nextMask[ny][nx] = shouldRemove;
+      }
+    }
+    return nextMask;
+  }, [brushSize]);
+
+  const setPrimaryTool = useCallback((nextTool) => {
+    if (tool === 'bgRemove' && nextTool !== 'bgRemove' && backgroundRemovalMask) {
+      cancelBackgroundRemoval();
+    }
+    setTool(nextTool);
+  }, [backgroundRemovalMask, cancelBackgroundRemoval, tool]);
+
   const createHistorySnapshot = useCallback((nextPixels, overrides = {}) => ({
     pixels: nextPixels,
     layerOrder: overrides.layerOrder ?? layerOrderRef.current,
@@ -1919,6 +2083,20 @@ const App = () => {
         return { stack: n, step: n.length - 1 };
     });
   }, [createHistorySnapshot]);
+
+  const applyBackgroundRemoval = useCallback(() => {
+    if (!pixelsRef.current || !backgroundRemovalMask) return;
+    const nextPixels = pixelsRef.current.map((row, y) => row.map((pixel, x) => (
+      backgroundRemovalMask[y]?.[x] ? [...TRANSPARENT_COLOR] : [...pixel]
+    )));
+    pushToHistory(pixelsRef.current);
+    setPixels(nextPixels);
+    syncLayersFromPixels(nextPixels);
+    setBackgroundRemovalMask(null);
+    setBackgroundRemovalEditTool('pen');
+    setTool('pen');
+    setStatusMessage('背景を透過しました');
+  }, [backgroundRemovalMask, pushToHistory, syncLayersFromPixels]);
 
   const applySquareCanvasChange = useCallback((nextPixels, nextGridSize, status) => {
     setPixels(nextPixels);
@@ -2147,6 +2325,11 @@ const App = () => {
     setPixels(prev => {
       if (!prev || !prev[y] || prev[y][x] === undefined) return prev;
       if (tool === 'select') { if (isFirst) setSelection({ start: { x, y }, end: { x, y } }); else setSelection(s => s ? { ...s, end: { x, y } } : { start: { x, y }, end: { x, y } }); return prev; }
+      if (tool === 'bgRemove') {
+        const shouldRemove = backgroundRemovalEditTool === 'pen';
+        setBackgroundRemovalMask((currentMask) => updateBackgroundRemovalMaskAtPoint(currentMask, x, y, shouldRemove));
+        return prev;
+      }
       if (tool === 'paste') {
         if (!isFirst || !clipboard) return prev; const n = prev.map(r => [...r]);
         clipboard.data.forEach((row, dy) => row.forEach((color, dx) => {
@@ -2229,7 +2412,7 @@ const App = () => {
       }
       return prev;
     });
-  }, [tool, currentColor, isTransparentMode, brushSize, clipboard]);
+  }, [tool, currentColor, isTransparentMode, brushSize, clipboard, backgroundRemovalEditTool, updateBackgroundRemovalMaskAtPoint]);
 
   const reprocessImage = useCallback((imgSrc, size, offsetX, offsetY) => {
     if (!imgSrc) return; const img = new Image();
@@ -3015,6 +3198,17 @@ const App = () => {
         ctx.globalAlpha = 1;
       }));
     }
+    if (backgroundRemovalMask?.length) {
+      backgroundRemovalMask.forEach((row, y) => row.forEach((marked, x) => {
+        if (!marked) return;
+        const left = snap(x); const top = snap(y); const right = snap(x + 1); const bottom = snap(y + 1);
+        ctx.fillStyle = 'rgba(244, 63, 94, 0.26)';
+        ctx.fillRect(left, top, right - left, bottom - top);
+        ctx.strokeStyle = 'rgba(225, 29, 72, 0.55)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(left + 0.5, top + 0.5, right - left - 1, bottom - top - 1);
+      }));
+    }
     if (showGrid) {
       ctx.strokeStyle = 'rgba(0,0,0,0.1)';
       ctx.lineWidth = 1;
@@ -3036,7 +3230,7 @@ const App = () => {
       ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.fillStyle = 'rgba(79, 70, 229, 0.1)'; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]);
     }
     if (useVirtualPad) { const left = snap(cursorPos.x); const top = snap(cursorPos.y); const right = snap(cursorPos.x + 1); const bottom = snap(cursorPos.y + 1); ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2.5; ctx.strokeRect(left, top, right - left, bottom - top); }
-  }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, movingSelection, tool, clipboard, showGrid]);
+  }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, movingSelection, tool, clipboard, showGrid, backgroundRemovalMask]);
 
   useEffect(() => {
     if (activeTab === '3d' && pixels && threeRef.current) {
@@ -3229,6 +3423,7 @@ const App = () => {
   const selected3DLayerColor = selected3DLayerIndex >= 0 ? JSON.parse(selected3DLayer) : null;
   const canShowCanvasLayerJump = canvasLayerJumpColor && layerOrder.includes(JSON.stringify(canvasLayerJumpColor));
   const canShowSelectionActions = tool === 'select' && !!selection && !!pixels;
+  const canShowBackgroundRemovalActions = tool === 'bgRemove' && !!backgroundRemovalMask && !!pixels;
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
@@ -3420,6 +3615,14 @@ const App = () => {
                   {useVirtualPad && pixels && (
                     <div className="sticky inset-0 pointer-events-none z-30 h-full w-full">
                       <div className="absolute bottom-28 left-6 pointer-events-auto flex flex-col gap-3">
+                        {canShowBackgroundRemovalActions && (
+                          <div className="flex flex-col gap-2">
+                            <button onClick={() => setBackgroundRemovalEditTool('pen')} className={`w-12 h-12 rounded-xl flex items-center justify-center shadow-xl border-2 active:scale-90 ${backgroundRemovalEditTool === 'pen' ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-white text-slate-600 border-slate-200'}`}><Paintbrush size={18}/></button>
+                            <button onClick={() => setBackgroundRemovalEditTool('eraser')} className={`w-12 h-12 rounded-xl flex items-center justify-center shadow-xl border-2 active:scale-90 ${backgroundRemovalEditTool === 'eraser' ? 'bg-amber-500 text-white border-amber-300' : 'bg-white text-slate-600 border-slate-200'}`}><Eraser size={18}/></button>
+                            <button onClick={applyBackgroundRemoval} className="w-12 h-12 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-xl border-2 border-emerald-400 active:scale-90"><Check size={18}/></button>
+                            <button onClick={() => cancelBackgroundRemoval()} className="w-12 h-12 rounded-xl bg-slate-700 text-white flex items-center justify-center shadow-xl border-2 border-slate-500 active:scale-90"><CloseIcon size={18}/></button>
+                          </div>
+                        )}
                         {canShowSelectionActions && (
                           <div className="flex flex-col gap-2">
                             <button onClick={handleCopy} className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xl border-2 border-indigo-400 active:scale-90"><Copy size={18}/></button>
@@ -3438,6 +3641,26 @@ const App = () => {
                 </div>
                 {pixels && !useVirtualPad && (
                   <div className="absolute top-4 right-4 z-50 flex flex-col items-end gap-2">
+                    {canShowBackgroundRemovalActions && (
+                      <div className="flex items-center gap-2 flex-wrap justify-end">
+                        <button onClick={() => setBackgroundRemovalEditTool('pen')} className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl shadow-lg active:scale-95 transition border ${backgroundRemovalEditTool === 'pen' ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-white/90 backdrop-blur-md text-slate-700 border-white/30'}`}>
+                          <Paintbrush size={16} />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Pen</span>
+                        </button>
+                        <button onClick={() => setBackgroundRemovalEditTool('eraser')} className={`flex items-center justify-center gap-2 px-3 py-2 rounded-xl shadow-lg active:scale-95 transition border ${backgroundRemovalEditTool === 'eraser' ? 'bg-amber-500 text-white border-amber-300' : 'bg-white/90 backdrop-blur-md text-slate-700 border-white/30'}`}>
+                          <Eraser size={16} />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Eraser</span>
+                        </button>
+                        <button onClick={applyBackgroundRemoval} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-emerald-600 text-white border border-emerald-400 shadow-lg active:scale-95 transition">
+                          <Check size={16} />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Apply</span>
+                        </button>
+                        <button onClick={() => cancelBackgroundRemoval()} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-slate-700 text-white border border-slate-500 shadow-lg active:scale-95 transition">
+                          <CloseIcon size={16} />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Cancel</span>
+                        </button>
+                      </div>
+                    )}
                     {canShowSelectionActions && (
                       <div className="flex items-center gap-2">
                         <button onClick={handleCopy} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-indigo-600 text-white border border-indigo-400 shadow-lg active:scale-95 transition">
@@ -3572,7 +3795,7 @@ const App = () => {
                     {isToolSelectorVisible && (
                       <div ref={toolbarRef} className="flex items-center gap-2 px-2.5 py-1.5 overflow-x-auto no-scrollbar scroll-smooth">
                         <div className="flex gap-0.5 pr-2 border-r border-white/10 shrink-0">
-                          <button onClick={() => setTool('hand')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='hand'?'bg-amber-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Hand size={18}/></button><button onClick={() => setTool('pen')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='pen'&&!isTransparentMode?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Edit3 size={18}/></button><button onClick={() => setTool('select')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='select'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Square size={18}/></button><button onClick={() => setTool('paste')} disabled={!clipboard} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='paste'?'bg-emerald-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300 disabled:opacity-10'}`}><ClipboardPaste size={18}/></button><button onClick={() => setTool('bucket')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bucket'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><PaintBucket size={18}/></button><button onClick={() => setTool('islandFill')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='islandFill'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Paintbrush size={18}/></button><button onClick={() => setTool('autoOutline')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='autoOutline'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><ScanLine size={18}/></button><button onClick={() => setTool('dropper')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='dropper'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Pipette size={18}/></button><button onClick={() => setIsTransparentMode(!isTransparentMode)} className={`p-2.5 rounded-full transition-all shrink-0 ${isTransparentMode?'bg-white text-black':'text-slate-500 hover:text-slate-300'}`}><Circle size={16} strokeDasharray="3 3"/></button>
+                          <button onClick={() => setPrimaryTool('hand')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='hand'?'bg-amber-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Hand size={18}/></button><button onClick={() => setPrimaryTool('pen')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='pen'&&!isTransparentMode?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Edit3 size={18}/></button><button onClick={() => setPrimaryTool('select')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='select'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Square size={18}/></button><button onClick={() => setPrimaryTool('paste')} disabled={!clipboard} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='paste'?'bg-emerald-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300 disabled:opacity-10'}`}><ClipboardPaste size={18}/></button><button onClick={() => setPrimaryTool('bucket')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bucket'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><PaintBucket size={18}/></button><button onClick={() => setPrimaryTool('islandFill')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='islandFill'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Paintbrush size={18}/></button><button onClick={() => setPrimaryTool('autoOutline')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='autoOutline'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><ScanLine size={18}/></button><button onClick={startBackgroundRemoval} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='bgRemove'?'bg-rose-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Trash2 size={18}/></button><button onClick={() => setPrimaryTool('dropper')} className={`p-2.5 rounded-full transition-all shrink-0 ${tool==='dropper'?'bg-indigo-500 text-white shadow-lg':'text-slate-500 hover:text-slate-300'}`}><Pipette size={18}/></button><button onClick={() => setIsTransparentMode(!isTransparentMode)} className={`p-2.5 rounded-full transition-all shrink-0 ${isTransparentMode?'bg-white text-black':'text-slate-500 hover:text-slate-300'}`}><Circle size={16} strokeDasharray="3 3"/></button>
                         </div>
                       </div>
                     )}
