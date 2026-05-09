@@ -2852,14 +2852,32 @@ const App = () => {
 
   useEffect(() => {
     const c = editorCanvasRef.current; if (!c || !pixels) return; const ctx = c.getContext('2d');
-    const h = pixels.length; const w = pixels[0].length; const ps = 10 * zoom; c.width = w * ps; c.height = h * ps;
+    const h = pixels.length; const w = pixels[0].length; const ps = 10 * zoom; c.width = Math.round(w * ps); c.height = Math.round(h * ps);
+    ctx.imageSmoothingEnabled = false;
+    const snap = (value) => Math.round(value * ps);
     ctx.fillStyle = '#f8f9fa'; ctx.fillRect(0, 0, c.width, c.height);
     const cs = Math.max(2, 5 * zoom); ctx.fillStyle = '#f1f5f9';
     for (let y = 0; y < c.height; y += cs * 2) for (let x = 0; x < c.width; x += cs * 2) { ctx.fillRect(x, y, cs, cs); ctx.fillRect(x + cs, y + cs, cs, cs); }
-    if (showGrid) { ctx.strokeStyle = 'rgba(0,0,0,0.1)'; ctx.lineWidth = 0.5; for (let x = 1; x < w; x++) { ctx.beginPath(); ctx.moveTo(x * ps, 0); ctx.lineTo(x * ps, h * ps); ctx.stroke(); } for (let y = 1; y < h; y++) { ctx.beginPath(); ctx.moveTo(0, y * ps); ctx.lineTo(w * ps, y * ps); ctx.stroke(); } }
-    pixels.forEach((r, y) => r.forEach((col, x) => { if (!Array.isArray(col) || JSON.stringify(col) === TRANSPARENT_KEY) return; ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`; ctx.fillRect(x * ps, y * ps, ps, ps); }));
-    if (selection) { const x1 = Math.min(selection.start.x, selection.end.x) * ps; const x2 = (Math.max(selection.start.x, selection.end.x) + 1) * ps; const y1 = Math.min(selection.start.y, selection.end.y) * ps; const y2 = (Math.max(selection.start.y, selection.end.y) + 1) * ps; ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.fillStyle = 'rgba(79, 70, 229, 0.1)'; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]); }
-    if (useVirtualPad) { ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2.5; ctx.strokeRect(cursorPos.x * ps, cursorPos.y * ps, ps, ps); }
+    pixels.forEach((r, y) => r.forEach((col, x) => {
+      if (!Array.isArray(col) || JSON.stringify(col) === TRANSPARENT_KEY) return;
+      const left = snap(x); const top = snap(y); const right = snap(x + 1); const bottom = snap(y + 1);
+      ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+      ctx.fillRect(left, top, right - left, bottom - top);
+    }));
+    if (showGrid) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+      ctx.lineWidth = 1;
+      for (let x = 1; x < w; x++) {
+        const px = snap(x) + 0.5;
+        ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, c.height); ctx.stroke();
+      }
+      for (let y = 1; y < h; y++) {
+        const py = snap(y) + 0.5;
+        ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(c.width, py); ctx.stroke();
+      }
+    }
+    if (selection) { const x1 = snap(Math.min(selection.start.x, selection.end.x)); const x2 = snap(Math.max(selection.start.x, selection.end.x) + 1); const y1 = snap(Math.min(selection.start.y, selection.end.y)); const y2 = snap(Math.max(selection.start.y, selection.end.y) + 1); ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.fillStyle = 'rgba(79, 70, 229, 0.1)'; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]); }
+    if (useVirtualPad) { const left = snap(cursorPos.x); const top = snap(cursorPos.y); const right = snap(cursorPos.x + 1); const bottom = snap(cursorPos.y + 1); ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2.5; ctx.strokeRect(left, top, right - left, bottom - top); }
   }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, tool, clipboard, showGrid]);
 
   useEffect(() => {
