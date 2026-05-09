@@ -1797,6 +1797,7 @@ const App = () => {
   const [useVirtualPad, setUseVirtualPad] = useState(false); const [isCanvasLocked, setIsCanvasLocked] = useState(false);
   const [cursorPos, setCursorPos] = useState({ x: 0, y: 0 }); const [isPlotting, setIsPlotting] = useState(false);
   const [selection, setSelection] = useState(null); const [clipboard, setClipboard] = useState(null);
+  const [movingSelection, setMovingSelection] = useState(null);
   const [layerOrder, setLayerOrder] = useState([]); const [layerHeightAdjustments, setLayerHeightAdjustments] = useState({});
   const [layerSmoothingSettings, setLayerSmoothingSettings] = useState({});
   const [showConfirmModal, setShowConfirmModal] = useState(false); const [showCanvasAdjustModal, setShowCanvasAdjustModal] = useState(false); const [isExporting, setIsExporting] = useState(false); 
@@ -2614,6 +2615,44 @@ const App = () => {
     }
     if (tool === 'hand') { isDrawingRef.current = true; const c = scrollContainerRef.current; dragStartRef.current = { x: cx, y: cy, scrollLeft: c.scrollLeft, scrollTop: c.scrollTop }; return; }
     const r = editorCanvasRef.current.getBoundingClientRect(); const x = Math.floor((cx - r.left) / (10 * zoom)); const y = Math.floor((cy - r.top) / (10 * zoom));
+    if (tool === 'select') {
+      const activeSelection = movingSelection ? {
+        x1: movingSelection.previewX,
+        y1: movingSelection.previewY,
+        x2: movingSelection.previewX + movingSelection.width - 1,
+        y2: movingSelection.previewY + movingSelection.height - 1,
+      } : selection ? {
+        x1: Math.min(selection.start.x, selection.end.x),
+        y1: Math.min(selection.start.y, selection.end.y),
+        x2: Math.max(selection.start.x, selection.end.x),
+        y2: Math.max(selection.start.y, selection.end.y),
+      } : null;
+      const insideSelection = activeSelection && x >= activeSelection.x1 && x <= activeSelection.x2 && y >= activeSelection.y1 && y <= activeSelection.y2;
+      if (insideSelection && pixelsRef.current) {
+        isDrawingRef.current = true;
+        if (!movingSelection) {
+          const data = [];
+          for (let sy = activeSelection.y1; sy <= activeSelection.y2; sy++) {
+            data.push(pixelsRef.current[sy].slice(activeSelection.x1, activeSelection.x2 + 1));
+          }
+          setMovingSelection({
+            data,
+            width: activeSelection.x2 - activeSelection.x1 + 1,
+            height: activeSelection.y2 - activeSelection.y1 + 1,
+            sourceRect: activeSelection,
+            previewX: activeSelection.x1,
+            previewY: activeSelection.y1,
+            isDragging: true,
+            dragOffsetX: x - activeSelection.x1,
+            dragOffsetY: y - activeSelection.y1,
+          });
+          setStatusMessage("選択範囲をドラッグして移動してください");
+        } else {
+          setMovingSelection(prev => prev ? { ...prev, isDragging: true, dragOffsetX: x - prev.previewX, dragOffsetY: y - prev.previewY } : prev);
+        }
+        return;
+      }
+    }
     if (x >= 0 && y >= 0 && x < (pixelsRef.current?.[0]?.length || 0) && y < (pixelsRef.current?.length || 0)) { isDrawingRef.current = true; handleToolAction(x, y, true); }
   };
 
@@ -2641,6 +2680,14 @@ const App = () => {
     if (!isDrawingRef.current) return;
     if (tool === 'hand') { const c = scrollContainerRef.current; c.scrollLeft = dragStartRef.current.scrollLeft - (cx - dragStartRef.current.x); c.scrollTop = dragStartRef.current.scrollTop - (cy - dragStartRef.current.y); return; }
     const r = editorCanvasRef.current.getBoundingClientRect(); const x = Math.floor((cx - r.left) / (10 * zoom)); const y = Math.floor((cy - r.top) / (10 * zoom));
+    if (tool === 'select' && movingSelection?.isDragging) {
+      const maxX = Math.max(0, (pixelsRef.current?.[0]?.length || 0) - movingSelection.width);
+      const maxY = Math.max(0, (pixelsRef.current?.length || 0) - movingSelection.height);
+      const nextX = Math.max(0, Math.min(maxX, x - movingSelection.dragOffsetX));
+      const nextY = Math.max(0, Math.min(maxY, y - movingSelection.dragOffsetY));
+      setMovingSelection(prev => prev ? { ...prev, previewX: nextX, previewY: nextY } : prev);
+      return;
+    }
     if (x >= 0 && y >= 0 && x < (pixelsRef.current?.[0]?.length || 0) && y < (pixelsRef.current?.length || 0)) handleToolAction(x, y, false);
   };
 
@@ -2706,7 +2753,42 @@ const App = () => {
     if (layerJumpHighlightTimeoutRef.current) clearTimeout(layerJumpHighlightTimeoutRef.current);
   }, []);
 
-  const stopDrawingNormal = () => { if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select' && tool !== 'dropper') { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } isDrawingRef.current = false; resetPinchZoom(); };
+  useEffect(() => {
+    if (!movingSelection || tool === 'select') return;
+    setMovingSelection(null);
+    setStatusMessage("移動をキャンセルしました");
+  }, [movingSelection, tool]);
+
+  const stopDrawingNormal = () => {
+    if (movingSelection?.isDragging && tool === 'select' && pixelsRef.current) {
+      const { sourceRect, previewX, previewY, data, width, height } = movingSelection;
+      const nextPixels = pixelsRef.current.map(row => row.map(pixel => [...pixel]));
+      for (let y = sourceRect.y1; y <= sourceRect.y2; y++) {
+        for (let x = sourceRect.x1; x <= sourceRect.x2; x++) {
+          nextPixels[y][x] = [...TRANSPARENT_COLOR];
+        }
+      }
+      data.forEach((row, dy) => row.forEach((color, dx) => {
+        const tx = previewX + dx; const ty = previewY + dy;
+        if (ty >= 0 && ty < nextPixels.length && tx >= 0 && tx < nextPixels[0].length) nextPixels[ty][tx] = color;
+      }));
+      setPixels(nextPixels);
+      syncLayersFromPixels(nextPixels);
+      pushToHistory(nextPixels);
+      setSelection({ start: { x: previewX, y: previewY }, end: { x: previewX + width - 1, y: previewY + height - 1 } });
+      setMovingSelection(null);
+      setStatusMessage("移動しました！");
+      isDrawingRef.current = false;
+      resetPinchZoom();
+      return;
+    }
+    if (isDrawingRef.current && pixelsRef.current && tool !== 'hand' && tool !== 'select' && tool !== 'dropper') {
+      pushToHistory(pixelsRef.current);
+      syncLayersFromPixels(pixelsRef.current);
+    }
+    isDrawingRef.current = false;
+    resetPinchZoom();
+  };
   const startOriginalImageDrag = (e) => {
     const container = originalImageContainerRef.current;
     if (!container) return;
@@ -2738,7 +2820,14 @@ const App = () => {
   };
   const handleTrackpadEnd = () => isDrawingRef.current = false;
   const startPlotting = (e) => { e.preventDefault(); setIsPlotting(true); handleToolAction(cursorPos.x, cursorPos.y, true); };
-  const stopPlotting = (e) => { e.preventDefault(); setIsPlotting(false); if (tool !== 'select' && pixelsRef.current) { pushToHistory(pixelsRef.current); syncLayersFromPixels(pixelsRef.current); } };
+  const stopPlotting = (e) => {
+    e.preventDefault();
+    setIsPlotting(false);
+    if (tool !== 'select' && pixelsRef.current) {
+      pushToHistory(pixelsRef.current);
+      syncLayersFromPixels(pixelsRef.current);
+    }
+  };
 
   const handleCopy = useCallback((e) => {
     if (e) { e.preventDefault(); e.stopPropagation(); }
@@ -2859,11 +2948,24 @@ const App = () => {
     const cs = Math.max(2, 5 * zoom); ctx.fillStyle = '#f1f5f9';
     for (let y = 0; y < c.height; y += cs * 2) for (let x = 0; x < c.width; x += cs * 2) { ctx.fillRect(x, y, cs, cs); ctx.fillRect(x + cs, y + cs, cs, cs); }
     pixels.forEach((r, y) => r.forEach((col, x) => {
+      if (movingSelection && x >= movingSelection.sourceRect.x1 && x <= movingSelection.sourceRect.x2 && y >= movingSelection.sourceRect.y1 && y <= movingSelection.sourceRect.y2) return;
       if (!Array.isArray(col) || JSON.stringify(col) === TRANSPARENT_KEY) return;
       const left = snap(x); const top = snap(y); const right = snap(x + 1); const bottom = snap(y + 1);
       ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
       ctx.fillRect(left, top, right - left, bottom - top);
     }));
+    if (movingSelection) {
+      movingSelection.data.forEach((row, dy) => row.forEach((col, dx) => {
+        const tx = movingSelection.previewX + dx; const ty = movingSelection.previewY + dy;
+        if (tx < 0 || tx >= w || ty < 0 || ty >= h) return;
+        if (!Array.isArray(col) || JSON.stringify(col) === TRANSPARENT_KEY) return;
+        const left = snap(tx); const top = snap(ty); const right = snap(tx + 1); const bottom = snap(ty + 1);
+        ctx.globalAlpha = 0.9;
+        ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+        ctx.fillRect(left, top, right - left, bottom - top);
+        ctx.globalAlpha = 1;
+      }));
+    }
     if (showGrid) {
       ctx.strokeStyle = 'rgba(0,0,0,0.1)';
       ctx.lineWidth = 1;
@@ -2876,9 +2978,16 @@ const App = () => {
         ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(c.width, py); ctx.stroke();
       }
     }
-    if (selection) { const x1 = snap(Math.min(selection.start.x, selection.end.x)); const x2 = snap(Math.max(selection.start.x, selection.end.x) + 1); const y1 = snap(Math.min(selection.start.y, selection.end.y)); const y2 = snap(Math.max(selection.start.y, selection.end.y) + 1); ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.fillStyle = 'rgba(79, 70, 229, 0.1)'; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]); }
+    if (selection || movingSelection) {
+      const sx1 = movingSelection ? movingSelection.previewX : Math.min(selection.start.x, selection.end.x);
+      const sx2 = movingSelection ? movingSelection.previewX + movingSelection.width - 1 : Math.max(selection.start.x, selection.end.x);
+      const sy1 = movingSelection ? movingSelection.previewY : Math.min(selection.start.y, selection.end.y);
+      const sy2 = movingSelection ? movingSelection.previewY + movingSelection.height - 1 : Math.max(selection.start.y, selection.end.y);
+      const x1 = snap(sx1); const x2 = snap(sx2 + 1); const y1 = snap(sy1); const y2 = snap(sy2 + 1);
+      ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([5, 3]); ctx.strokeRect(x1, y1, x2 - x1, y2 - y1); ctx.fillStyle = 'rgba(79, 70, 229, 0.1)'; ctx.fillRect(x1, y1, x2 - x1, y2 - y1); ctx.setLineDash([]);
+    }
     if (useVirtualPad) { const left = snap(cursorPos.x); const top = snap(cursorPos.y); const right = snap(cursorPos.x + 1); const bottom = snap(cursorPos.y + 1); ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2.5; ctx.strokeRect(left, top, right - left, bottom - top); }
-  }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, tool, clipboard, showGrid]);
+  }, [pixels, zoom, activeTab, cursorPos, useVirtualPad, selection, movingSelection, tool, clipboard, showGrid]);
 
   useEffect(() => {
     if (activeTab === '3d' && pixels && threeRef.current) {
