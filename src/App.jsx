@@ -28,6 +28,7 @@ import {
   DownloadCloud,
   Square,
   Copy,
+  Scissors,
   ClipboardPaste,
   FileJson,
   FolderOpen,
@@ -2748,6 +2749,26 @@ const App = () => {
     setClipboard({ data: d, width: x2 - x1 + 1, height: y2 - y1 + 1 }); setSelection(null); setStatusMessage("コピーしました！"); setTool('paste');
   }, [selection]);
 
+  const handleCut = useCallback((e) => {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    if (!selection || !pixelsRef.current) return;
+    const x1 = Math.min(selection.start.x, selection.end.x); const x2 = Math.max(selection.start.x, selection.end.x);
+    const y1 = Math.min(selection.start.y, selection.end.y); const y2 = Math.max(selection.start.y, selection.end.y);
+    const d = [];
+    const nextPixels = pixelsRef.current.map(row => row.map(pixel => [...pixel]));
+    for (let y = y1; y <= y2; y++) {
+      d.push(pixelsRef.current[y].slice(x1, x2 + 1));
+      for (let x = x1; x <= x2; x++) nextPixels[y][x] = [...TRANSPARENT_COLOR];
+    }
+    setClipboard({ data: d, width: x2 - x1 + 1, height: y2 - y1 + 1 });
+    setPixels(nextPixels);
+    syncLayersFromPixels(nextPixels);
+    pushToHistory(nextPixels);
+    setSelection(null);
+    setStatusMessage("切り取りました！");
+    setTool('paste');
+  }, [selection, pushToHistory, syncLayersFromPixels]);
+
   const applyLayerOrderChange = useCallback((nextLayerOrder, options = {}) => {
     if (!pixels) return false;
     if (nextLayerOrder.length !== layerOrder.length || nextLayerOrder.every((key, index) => key === layerOrder[index])) return false;
@@ -3025,6 +3046,7 @@ const App = () => {
   const selected3DLayerIndex = selected3DLayer ? (is3DLayerMoveMode ? draft3DLayerOrder.indexOf(selected3DLayer) : layerOrder.indexOf(selected3DLayer)) : -1;
   const selected3DLayerColor = selected3DLayerIndex >= 0 ? JSON.parse(selected3DLayer) : null;
   const canShowCanvasLayerJump = canvasLayerJumpColor && layerOrder.includes(JSON.stringify(canvasLayerJumpColor));
+  const canShowSelectionActions = tool === 'select' && !!selection && !!pixels;
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
@@ -3178,7 +3200,12 @@ const App = () => {
                   {useVirtualPad && pixels && (
                     <div className="sticky inset-0 pointer-events-none z-30 h-full w-full">
                       <div className="absolute bottom-28 left-6 pointer-events-auto flex flex-col gap-3">
-                        {tool === 'select' && selection && (<button onPointerDown={handleCopy} className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xl border-2 border-indigo-400 active:scale-90"><Copy size={18}/></button>)}
+                        {canShowSelectionActions && (
+                          <div className="flex flex-col gap-2">
+                            <button onClick={handleCopy} className="w-12 h-12 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xl border-2 border-indigo-400 active:scale-90"><Copy size={18}/></button>
+                            <button onClick={handleCut} className="w-12 h-12 rounded-xl bg-rose-600 text-white flex items-center justify-center shadow-xl border-2 border-rose-400 active:scale-90"><Scissors size={18}/></button>
+                          </div>
+                        )}
                         <button onPointerDown={startPlotting} onPointerUp={stopPlotting} className={`w-16 h-16 rounded-full flex items-center justify-center border-4 shadow-2xl transition-all ${isPlotting ? 'bg-indigo-600/80 border-indigo-400 text-white scale-95' : 'bg-white/40 backdrop-blur-sm border-white/50 text-indigo-600'}`}><span className="text-[10px] font-black uppercase tracking-widest">{tool === 'paste' ? 'Paste' : 'Plot'}</span></button>
                       </div>
                       <div className="absolute bottom-28 right-6 pointer-events-auto">
@@ -3191,6 +3218,18 @@ const App = () => {
                 </div>
                 {pixels && !useVirtualPad && (
                   <div className="absolute top-4 right-4 z-50 flex flex-col items-end gap-2">
+                    {canShowSelectionActions && (
+                      <div className="flex items-center gap-2">
+                        <button onClick={handleCopy} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-indigo-600 text-white border border-indigo-400 shadow-lg active:scale-95 transition">
+                          <Copy size={16} />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Copy</span>
+                        </button>
+                        <button onClick={handleCut} className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-rose-600 text-white border border-rose-400 shadow-lg active:scale-95 transition">
+                          <Scissors size={16} />
+                          <span className="text-[9px] font-black uppercase tracking-widest">Cut</span>
+                        </button>
+                      </div>
+                    )}
                     {canShowCanvasLayerJump && (
                       <button
                         onClick={handleCanvasLayerJump}
