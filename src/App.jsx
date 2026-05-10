@@ -3426,7 +3426,7 @@ const App = () => {
   const canShowBackgroundRemovalActions = tool === 'bgRemove' && !!backgroundRemovalMask && !!pixels;
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
+    <div className="app-shell flex flex-col bg-slate-50 text-slate-900 font-sans select-none overflow-hidden relative text-left">
       <header className="flex items-center justify-between px-6 py-2.5 bg-white/80 backdrop-blur-md border-b border-slate-100 z-30 shrink-0">
         <h1 className="text-base font-black text-indigo-600 flex flex-wrap items-center gap-1 italic uppercase tracking-tight">
           <Zap fill="currentColor" size={18} />
@@ -3524,7 +3524,7 @@ const App = () => {
           </div>
         </div>
       )}
-      <main className="flex-1 flex flex-col p-1.5 overflow-hidden relative">
+      <main className="main-with-tabbar flex-1 flex flex-col p-1.5 overflow-hidden relative">
         <div className="flex-1 bg-white rounded-[1.5rem] shadow-sm border border-slate-100 flex flex-col overflow-hidden relative">
           {activeTab === 'editor' && (
             <div className="h-full flex flex-col relative">
@@ -4236,12 +4236,24 @@ const App = () => {
           )}
         </div>
       </main>
-      <nav className="flex justify-center items-center bg-white/90 backdrop-blur-lg border-t border-slate-100 px-2 py-1 shadow-[0_-4px_20px_rgba(0,0,0,0.02)] z-30 shrink-0">
+      <nav className="bottom-tabbar fixed inset-x-0 bottom-0 flex justify-center items-center bg-white/90 backdrop-blur-lg border-t border-slate-100 px-2 py-1 shadow-[0_-4px_20px_rgba(0,0,0,0.02)] z-30 shrink-0">
         <div className="flex gap-1">
           {[ { id: 'editor', icon: Edit3, label: 'Editor' }, { id: 'layers', icon: Layers, label: 'Layers' }, { id: '3d', icon: BoxIcon, label: '3D View' }, { id: 'settings', icon: Settings, label: 'Setup' } ].map(item => (<NavItem key={item.id} id={item.id} icon={item.icon} label={item.label} isActive={activeTab === item.id} onClick={handleTabChange} />))}
         </div>
       </nav>
       <style dangerouslySetInnerHTML={{ __html: `
+        .app-shell {
+          height: 100vh;
+          height: 100dvh;
+          min-height: 100vh;
+          min-height: 100dvh;
+        }
+        .main-with-tabbar {
+          padding-bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+        }
+        .bottom-tabbar {
+          padding-bottom: calc(0.25rem + env(safe-area-inset-bottom, 0px));
+        }
         .no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         .custom-scrollbar::-webkit-scrollbar { width: 3px; height: 3px; } .custom-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
         input[type=range] { -webkit-appearance: none; } input[type=range]:focus { outline: none; }
