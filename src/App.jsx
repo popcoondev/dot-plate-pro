@@ -130,6 +130,180 @@ const normalizeHexColor = (value) => {
   return null;
 };
 
+const parseMrpafHexColor = (value) => {
+  const raw = `${value || ''}`.trim();
+  if (!/^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(raw)) return null;
+  if (raw.length === 7) {
+    return {
+      rgb: [1, 3, 5].map((index) => parseInt(raw.slice(index, index + 2), 16)),
+      alpha: 255,
+    };
+  }
+
+  return {
+    rgb: [1, 3, 5].map((index) => parseInt(raw.slice(index, index + 2), 16)),
+    alpha: parseInt(raw.slice(7, 9), 16),
+  };
+};
+
+const decodeMrpafPixels = (pixelsNode, width, height) => {
+  if (!pixelsNode || typeof pixelsNode !== 'object') throw new Error('MRPAF layer is missing a valid pixels object.');
+  const total = width * height;
+  const { encoding, data } = pixelsNode;
+
+  if (encoding === 'array') {
+    if (!Array.isArray(data)) {
+      throw new Error('MRPAF array encoding does not match the declared pixel dimensions.');
+    }
+
+    if (data.length === height && data.every((row) => Array.isArray(row) && row.length === width && row.every((value) => typeof value === 'string'))) {
+      return data.map((row) => row.slice());
+    }
+
+    if (data.length === total && data.every((value) => typeof value === 'string')) {
+      const rows = [];
+      for (let y = 0; y < height; y += 1) {
+        rows.push(data.slice(y * width, (y + 1) * width));
+      }
+      return rows;
+    }
+
+    throw new Error('MRPAF array encoding does not match the declared pixel dimensions.');
+  }
+
+  if (encoding === 'rle') {
+    if (!Array.isArray(data)) throw new Error('MRPAF rle encoding must provide an array of runs.');
+    const values = [];
+    data.forEach((run) => {
+      if (!Array.isArray(run) || run.length !== 2 || typeof run[0] !== 'string' || !Number.isInteger(run[1]) || run[1] <= 0) {
+        throw new Error('MRPAF rle encoding contains an invalid run.');
+      }
+      for (let count = 0; count < run[1]; count += 1) values.push(run[0]);
+    });
+    if (values.length !== total) {
+      throw new Error('MRPAF rle encoding does not expand to the declared pixel dimensions.');
+    }
+    const rows = [];
+    for (let y = 0; y < height; y += 1) {
+      rows.push(values.slice(y * width, (y + 1) * width));
+    }
+    return rows;
+  }
+
+  if (encoding === 'sparse') {
+    if (typeof pixelsNode.defaultValue !== 'string') {
+      throw new Error('MRPAF sparse encoding requires a defaultValue.');
+    }
+    if (!Array.isArray(data)) throw new Error('MRPAF sparse encoding must provide an array of entries.');
+    const rows = Array.from({ length: height }, () => Array.from({ length: width }, () => pixelsNode.defaultValue));
+    const occupied = new Set();
+    data.forEach((entry) => {
+      if (!entry || !Number.isInteger(entry.x) || !Number.isInteger(entry.y) || typeof entry.value !== 'string') {
+        throw new Error('MRPAF sparse encoding contains an invalid entry.');
+      }
+      if (entry.x < 0 || entry.y < 0 || entry.x >= width || entry.y >= height) {
+        throw new Error('MRPAF sparse entry is outside the declared pixel bounds.');
+      }
+      const coordinateKey = `${entry.x},${entry.y}`;
+      if (occupied.has(coordinateKey)) {
+        throw new Error('MRPAF sparse encoding contains duplicate coordinates.');
+      }
+      occupied.add(coordinateKey);
+      rows[entry.y][entry.x] = entry.value;
+    });
+    return rows;
+  }
+
+  throw new Error(`Unsupported MRPAF pixel encoding: ${encoding}`);
+};
+
+const buildMrpafDocument = ({
+  pixels,
+  layerOrder,
+  projectName,
+  author,
+  source,
+  dotPlateProExtension,
+}) => {
+  const height = pixels.length;
+  const width = pixels[0]?.length || 0;
+  const usedColorKeys = new Set();
+  pixels.forEach((row) => row.forEach((cell) => {
+    if (JSON.stringify(cell) !== TRANSPARENT_KEY) usedColorKeys.add(JSON.stringify(cell));
+  }));
+
+  const orderedColorKeys = [
+    ...layerOrder.filter((key) => usedColorKeys.has(key)),
+    ...Array.from(usedColorKeys).filter((key) => !layerOrder.includes(key)),
+  ];
+
+  const palette = [{ id: 'transparent', hex: '#00000000', name: 'Transparent' }];
+  const paletteIdByColorKey = new Map();
+  orderedColorKeys.forEach((colorKey, index) => {
+    const rgb = JSON.parse(colorKey);
+    const id = `color-${index + 1}`;
+    palette.push({
+      id,
+      hex: rgbToHex(rgb),
+      name: `Layer ${index + 1}`,
+    });
+    paletteIdByColorKey.set(colorKey, id);
+  });
+
+  const mergedLayerRows = pixels.map((row) => row.map((cell) => {
+    const colorKey = JSON.stringify(cell);
+    return colorKey === TRANSPARENT_KEY ? 'transparent' : (paletteIdByColorKey.get(colorKey) || 'transparent');
+  }));
+
+  const layers = [{
+    id: 'layer-1',
+    name: 'Artwork',
+    visible: true,
+    opacity: 1,
+    resolution: {
+      pixelArraySize: {
+        width,
+        height,
+      },
+      scale: 1,
+    },
+    placement: {
+      x: 0,
+      y: 0,
+    },
+    pixels: {
+      encoding: 'array',
+      data: mergedLayerRows,
+    },
+  }];
+
+  const nowIso = new Date().toISOString();
+  return {
+    format: 'MRPAF',
+    version: '3.0.0',
+    metadata: {
+      title: projectName || 'Dot Plate Pro Project',
+      ...(author ? { author } : {}),
+      ...(source ? { source } : {}),
+      modified: nowIso,
+      created: nowIso,
+      ...(dotPlateProExtension ? {
+        extensions: {
+          dotplatepro: dotPlateProExtension,
+        },
+      } : {}),
+    },
+    canvas: {
+      baseWidth: width,
+      baseHeight: height,
+      backgroundColor: null,
+      subpixelPrecision: 0,
+    },
+    palette,
+    layers,
+  };
+};
+
 const createBooleanMask = (width, height, initialValue = false) =>
   Array.from({ length: height }, () => Array.from({ length: width }, () => initialValue));
 
@@ -2185,8 +2359,10 @@ const App = () => {
   const [isExportingOBJ, setIsExportingOBJ] = useState(false);
   const [isExportingGLTF, setIsExportingGLTF] = useState(false);
   const [is3DExportMenuOpen, setIs3DExportMenuOpen] = useState(false);
+  const [isSaveMenuOpen, setIsSaveMenuOpen] = useState(false);
   const [threeViewMode, setThreeViewMode] = useState('stack');
   const [useBambuPaintPlateGeometry, setUseBambuPaintPlateGeometry] = useState(true);
+  const [mrpafSourceAlphaMap, setMrpafSourceAlphaMap] = useState([]);
   const [selected3DLayer, setSelected3DLayer] = useState(null);
   const [is3DLayerMoveMode, setIs3DLayerMoveMode] = useState(false);
   const [draft3DLayerOrder, setDraft3DLayerOrder] = useState([]);
@@ -2702,6 +2878,7 @@ const App = () => {
         try {
           const frames = await buildGifFrameSources(buffer);
           if (!frames.length) throw new Error('No GIF frames decoded');
+          setMrpafSourceAlphaMap([]);
           setGifFrames(frames);
           setSelectedGifFrameIndex(0);
           setSourceImage(frames[0]);
@@ -2709,6 +2886,7 @@ const App = () => {
         } catch {
           const fallbackReader = new FileReader();
           fallbackReader.onload = (e) => {
+            setMrpafSourceAlphaMap([]);
             setGifFrames([]);
             setSelectedGifFrameIndex(0);
             setSourceImage(e.target.result);
@@ -2723,6 +2901,7 @@ const App = () => {
 
     const r = new FileReader();
     r.onload = (e) => {
+      setMrpafSourceAlphaMap([]);
       setGifFrames([]);
       setSelectedGifFrameIndex(0);
       setSourceImage(e.target.result);
@@ -2734,10 +2913,165 @@ const App = () => {
   const handleNewCanvas = useCallback(() => {
     const s = gridSize; const n = Array.from({ length: s }, () => Array.from({ length: s }, () => [...TRANSPARENT_COLOR]));
     const def = getFormattedDate("compact"); setProjectName(def); setOutputFileName(def);
-    setSourceImage(null); setGifFrames([]); setSelectedGifFrameIndex(0); setShowOriginal(false); setOriginalFilePath(""); setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 });
+    setSourceImage(null); setGifFrames([]); setSelectedGifFrameIndex(0); setShowOriginal(false); setOriginalFilePath(""); setCreatedAt(getFormattedDate("display")); setHistory({ stack: [], step: -1 }); setMrpafSourceAlphaMap([]);
     setPixels(n); pushToHistory(n); syncLayersFromPixels(n); setTool('pen'); setShowConfirmModal(false);
     const ip = { x: Math.floor(s / 2), y: Math.floor(s / 2) }; setCursorPos(ip); cursorSubPixelRef.current = { ...ip };
   }, [gridSize, pushToHistory, syncLayersFromPixels]);
+
+  const importMrpafProject = useCallback((documentData) => {
+    if (!documentData || typeof documentData !== 'object') throw new Error('Invalid MRPAF document.');
+    if (documentData.format !== 'MRPAF') throw new Error('This file is not an MRPAF document.');
+    if (documentData.version !== '3.0.0') throw new Error(`Unsupported MRPAF version: ${documentData.version || 'unknown'}`);
+    if (!documentData.canvas || !Number.isInteger(documentData.canvas.baseWidth) || !Number.isInteger(documentData.canvas.baseHeight)) {
+      throw new Error('MRPAF canvas is missing baseWidth/baseHeight.');
+    }
+    if (documentData.canvas.baseWidth <= 0 || documentData.canvas.baseHeight <= 0) {
+      throw new Error('MRPAF canvas dimensions must be greater than zero.');
+    }
+    if (!Array.isArray(documentData.palette) || !Array.isArray(documentData.layers)) {
+      throw new Error('MRPAF document is missing palette or layers.');
+    }
+    if (!documentData.layers.length) {
+      throw new Error('MRPAF document does not contain any layers.');
+    }
+
+    const warnings = [];
+
+    const paletteById = new Map();
+    documentData.palette.forEach((entry) => {
+      if (!entry || typeof entry.id !== 'string' || typeof entry.hex !== 'string') {
+        throw new Error('MRPAF palette contains an invalid entry.');
+      }
+      if (paletteById.has(entry.id)) throw new Error(`MRPAF palette ID is duplicated: ${entry.id}`);
+      const parsed = parseMrpafHexColor(entry.hex);
+      if (!parsed) throw new Error(`MRPAF palette entry has an invalid hex color: ${entry.hex}`);
+      paletteById.set(entry.id, parsed);
+    });
+
+    const width = documentData.canvas.baseWidth;
+    const height = documentData.canvas.baseHeight;
+    if ((documentData.canvas.subpixelPrecision || 0) > 0) {
+      warnings.push(`subpixelPrecision ${documentData.canvas.subpixelPrecision} was ignored.`);
+    }
+    const background = documentData.canvas.backgroundColor == null
+      ? [...TRANSPARENT_COLOR]
+      : (() => {
+          const parsed = parseMrpafHexColor(documentData.canvas.backgroundColor);
+          if (!parsed) throw new Error('MRPAF canvas backgroundColor is invalid.');
+          if (parsed.alpha > 0 && parsed.alpha < 255) {
+            warnings.push('Canvas backgroundColor used partial alpha and was flattened for editing.');
+          }
+          return parsed.alpha === 255 ? [...parsed.rgb] : [...TRANSPARENT_COLOR];
+        })();
+
+    const nextPixels = Array.from({ length: height }, () => Array.from({ length: width }, () => [...background]));
+    const nextLayerOrder = [];
+    const seenLayerColorKeys = new Set();
+    const sourceAlphaEntries = [];
+    const layer = documentData.layers[0];
+    if (!layer || typeof layer !== 'object') throw new Error('MRPAF first layer is invalid.');
+    if (documentData.layers.length > 1) {
+      warnings.push(`Only the first MRPAF layer was imported. ${documentData.layers.length - 1} additional layers were ignored in v1.`);
+    }
+    const visible = layer.visible ?? true;
+    const opacity = typeof layer.opacity === 'number' ? Math.max(0, Math.min(1, layer.opacity)) : 1;
+    if (!visible || opacity === 0) {
+      warnings.push('The first MRPAF layer was hidden or fully transparent, so the imported canvas is blank.');
+    }
+    if (!layer.resolution?.pixelArraySize) {
+      throw new Error(`MRPAF layer "${layer.name || layer.id || 1}" is missing resolution data.`);
+    }
+    const layerWidth = layer.resolution.pixelArraySize.width;
+    const layerHeight = layer.resolution.pixelArraySize.height;
+    const rawScale = typeof layer.resolution.scale === 'number' && layer.resolution.scale > 0 ? layer.resolution.scale : 1;
+    if (rawScale !== 1) {
+      warnings.push(`Layer scale ${rawScale} was flattened into the canvas grid.`);
+    }
+    if (!Number.isInteger(layerWidth) || !Number.isInteger(layerHeight) || layerWidth <= 0 || layerHeight <= 0) {
+      throw new Error(`MRPAF layer "${layer.name || layer.id || 1}" has an invalid resolution.`);
+    }
+    const rawPlacementX = typeof layer.placement?.x === 'number' ? layer.placement.x : 0;
+    const rawPlacementY = typeof layer.placement?.y === 'number' ? layer.placement.y : 0;
+    const placementX = Math.round(rawPlacementX);
+    const placementY = Math.round(rawPlacementY);
+    if (rawPlacementX !== placementX || rawPlacementY !== placementY) {
+      warnings.push('Layer placement used fractional coordinates and was rounded to the nearest grid position.');
+    }
+    if (opacity > 0 && opacity < 1) {
+      warnings.push(`Layer opacity ${opacity} was flattened for editing.`);
+    }
+
+    const decodedRows = decodeMrpafPixels(layer.pixels, layerWidth, layerHeight);
+    const scaledWidth = Math.max(1, Math.round(layerWidth * rawScale));
+    const scaledHeight = Math.max(1, Math.round(layerHeight * rawScale));
+    for (let scaledY = 0; scaledY < scaledHeight; scaledY += 1) {
+      const sourceY = Math.min(layerHeight - 1, Math.floor(scaledY / rawScale));
+      for (let scaledX = 0; scaledX < scaledWidth; scaledX += 1) {
+        const sourceX = Math.min(layerWidth - 1, Math.floor(scaledX / rawScale));
+        const paletteId = decodedRows[sourceY][sourceX];
+        const paletteEntry = paletteById.get(paletteId);
+        if (!paletteEntry) throw new Error(`MRPAF layer references unknown palette ID: ${paletteId}`);
+        const effectiveAlpha = Math.round(paletteEntry.alpha * opacity);
+        if (effectiveAlpha > 0 && effectiveAlpha < 255) {
+          sourceAlphaEntries.push({
+            x: placementX + scaledX,
+            y: placementY + scaledY,
+            alpha: effectiveAlpha,
+            hex: rgbToHex(paletteEntry.rgb),
+          });
+        }
+        if (effectiveAlpha !== 255) continue;
+
+        const targetX = placementX + scaledX;
+        const targetY = placementY + scaledY;
+        if (targetX < 0 || targetY < 0 || targetX >= width || targetY >= height) continue;
+        nextPixels[targetY][targetX] = [...paletteEntry.rgb];
+
+        const colorKey = JSON.stringify(paletteEntry.rgb);
+        if (!seenLayerColorKeys.has(colorKey)) {
+          seenLayerColorKeys.add(colorKey);
+          nextLayerOrder.push(colorKey);
+        }
+      }
+    }
+
+    isLoadingRef.current = true;
+    const importedTitle = documentData.metadata?.title || 'MRPAF Project';
+    const nextGridSize = Math.max(width, height);
+    const dotPlateProExtension = documentData.metadata?.extensions?.dotplatepro || {};
+    setProjectName(importedTitle);
+    setOutputFileName(dotPlateProExtension.outputFileName || importedTitle);
+    setAuthor(documentData.metadata?.author || '');
+    setCreatedAt(documentData.metadata?.created || '');
+    setOriginalFilePath('MRPAF import');
+    setGridSize(nextGridSize);
+    if (typeof dotPlateProExtension.dotSize === 'number') setDotSize(dotPlateProExtension.dotSize);
+    if (typeof dotPlateProExtension.layerThickness === 'number') setLayerThickness(dotPlateProExtension.layerThickness);
+    if (typeof dotPlateProExtension.baseThickness === 'number') setBaseThickness(dotPlateProExtension.baseThickness);
+    if (typeof dotPlateProExtension.padSensitivity === 'number') setPadSensitivity(dotPlateProExtension.padSensitivity);
+    setSourceImage(null);
+    setGifFrames([]);
+    setSelectedGifFrameIndex(0);
+    setPixels(nextPixels);
+    setLayerOrder(Array.isArray(dotPlateProExtension.layerOrder) ? dotPlateProExtension.layerOrder : nextLayerOrder);
+    setLayerHeightAdjustments(dotPlateProExtension.layerHeightAdjustments || {});
+    setLayerSmoothingSettings(dotPlateProExtension.layerSmoothingSettings || {});
+    setMrpafSourceAlphaMap(Array.isArray(dotPlateProExtension.sourceAlphaMap) ? dotPlateProExtension.sourceAlphaMap : sourceAlphaEntries);
+    setHistory({
+      stack: [JSON.stringify(createHistorySnapshot(nextPixels, {
+        layerOrder: Array.isArray(dotPlateProExtension.layerOrder) ? dotPlateProExtension.layerOrder : nextLayerOrder,
+        layerHeightAdjustments: dotPlateProExtension.layerHeightAdjustments || {},
+        layerSmoothingSettings: dotPlateProExtension.layerSmoothingSettings || {},
+      }))],
+      step: 0,
+    });
+    const statusParts = ['MRPAF imported successfully.'];
+    if (documentData.animations?.length) statusParts.push('Animations were ignored in this version.');
+    if (sourceAlphaEntries.length) statusParts.push('Partially transparent pixels were flattened to transparent for editing.');
+    if (warnings.length) statusParts.push(warnings.join(' '));
+    setStatusMessage(statusParts.join(' '));
+    setTimeout(() => { isLoadingRef.current = false; centerCanvas(); }, 100);
+  }, [baseThickness, centerCanvas, createHistorySnapshot, dotSize, layerThickness, padSensitivity]);
 
   const saveProject = useCallback(() => {
     if (!pixels) return;
@@ -2747,24 +3081,68 @@ const App = () => {
     l.click(); setStatusMessage("プロジェクトを保存しました！💾");
   }, [pixels, projectName, outputFileName, author, createdAt, originalFilePath, gridSize, dotSize, layerThickness, baseThickness, padSensitivity, layerOrder, layerHeightAdjustments, layerSmoothingSettings, sourceImage]);
 
+  const exportMRPAF = useCallback(() => {
+    if (!pixels?.length || !pixels[0]?.length) {
+      setStatusMessage('No canvas data available for MRPAF export.');
+      return;
+    }
+    try {
+      const dotPlateProExtension = {
+        schemaVersion: 1,
+        outputFileName,
+        dotSize,
+        layerThickness,
+        baseThickness,
+        padSensitivity,
+        layerOrder,
+        layerHeightAdjustments,
+        layerSmoothingSettings,
+        ...(mrpafSourceAlphaMap?.length ? { sourceAlphaMap: mrpafSourceAlphaMap } : {}),
+      };
+      const mrpafDocument = buildMrpafDocument({
+        pixels,
+        layerOrder,
+        projectName,
+        author,
+        source: originalFilePath || undefined,
+        dotPlateProExtension,
+      });
+      const blob = new Blob([JSON.stringify(mrpafDocument, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${outputFileName || projectName || 'project'}.mrpaf.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setStatusMessage('MRPAF v3.0.0 を出力しました。');
+    } catch (error) {
+      console.error(error);
+      setStatusMessage(`MRPAF export failed: ${error?.message || 'unknown error'}`);
+    }
+  }, [author, baseThickness, dotSize, layerHeightAdjustments, layerOrder, layerSmoothingSettings, layerThickness, mrpafSourceAlphaMap, originalFilePath, outputFileName, padSensitivity, pixels, projectName]);
+
   const loadProject = useCallback((e) => {
     const f = e.target.files[0]; if (!f) return; const r = new FileReader();
     r.onload = (ev) => {
       try {
         const d = JSON.parse(ev.target.result);
+        if (d?.format === 'MRPAF') {
+          importMrpafProject(d);
+          return;
+        }
         if (d.pixels) {
           isLoadingRef.current = true; setProjectName(d.projectName || ""); setOutputFileName(d.outputFileName || "");
           setAuthor(d.author || ""); setCreatedAt(d.createdAt || ""); setOriginalFilePath(d.originalFilePath || "");
-          setGridSize(d.gridSize); setDotSize(d.dotSize); setLayerThickness(d.layerThickness); setBaseThickness(d.baseThickness);
+          setGridSize(d.gridSize); setDotSize(d.dotSize); setLayerThickness(d.layerThickness); setBaseThickness(d.baseThickness); setMrpafSourceAlphaMap([]);
           setPadSensitivity(d.padSensitivity); setLayerOrder(d.layerOrder || []); setSourceImage(d.sourceImage || null); setGifFrames([]); setSelectedGifFrameIndex(0); setPixels(d.pixels);
           setLayerHeightAdjustments(d.layerHeightAdjustments || {}); setLayerSmoothingSettings(d.layerSmoothingSettings || {});
           setHistory({ stack: [JSON.stringify(createHistorySnapshot(d.pixels, { layerOrder: d.layerOrder || [], layerHeightAdjustments: d.layerHeightAdjustments || {}, layerSmoothingSettings: d.layerSmoothingSettings || {} }))], step: 0 }); setStatusMessage("プロジェクトを復元しました！📂");
           setTimeout(() => { isLoadingRef.current = false; centerCanvas(); }, 100);
         }
-      } catch (err) { setStatusMessage("読み込みエラー。"); }
+      } catch (err) { setStatusMessage(`読み込みエラー: ${err?.message || 'unknown error'}`); }
     };
     r.readAsText(f); e.target.value = '';
-  }, [centerCanvas, createHistorySnapshot]);
+  }, [centerCanvas, createHistorySnapshot, importMrpafProject]);
 
   const openCanvasAdjustModal = useCallback(() => {
     setCanvasAdjustSizeInput(`${gridSize}`);
@@ -4399,7 +4777,7 @@ const App = () => {
           )}
           {activeTab === 'settings' && (
             <div className="h-full px-6 py-4 overflow-auto custom-scrollbar">
-              <div className="flex justify-between items-center mb-6"><h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2"><Settings className="text-indigo-600" size={18}/> Setup</h2><div className="flex gap-2"><button onClick={saveProject} className="p-2.5 bg-white border border-slate-100 text-indigo-600 rounded-xl shadow-sm hover:bg-indigo-50 transition"><FileJson size={18} /></button><label className="p-2.5 bg-white border border-slate-100 text-indigo-600 rounded-xl shadow-sm cursor-pointer hover:bg-indigo-50 transition"><FolderOpen size={18} /><input type="file" accept=".json" className="hidden" onChange={loadProject} /></label><button onClick={exportImage} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase">Export Image</button></div></div>
+              <div className="flex justify-between items-center mb-6"><h2 className="text-base font-black tracking-tight uppercase flex items-center gap-2"><Settings className="text-indigo-600" size={18}/> Setup</h2><div className="flex gap-2 items-center"><div className="relative"><button onClick={() => setIsSaveMenuOpen((open) => !open)} className="px-3 py-2.5 bg-white border border-slate-100 text-indigo-600 rounded-xl shadow-sm hover:bg-indigo-50 transition text-[9px] font-black uppercase flex items-center gap-2" title="Save project"><FileJson size={16} /> Save</button>{isSaveMenuOpen && (<div className="absolute right-0 mt-2 w-52 bg-white/95 backdrop-blur-md border border-slate-100 rounded-2xl shadow-2xl p-2 z-20"><div className="flex flex-col gap-2"><button onClick={() => { setIsSaveMenuOpen(false); exportMRPAF(); }} className="w-full flex items-center justify-between gap-3 bg-indigo-50 text-indigo-700 px-3 py-2.5 rounded-xl text-[9px] font-black hover:bg-indigo-100 transition"><span className="flex items-center gap-2"><FileJson size={14} /> MRPAF v3.0.0</span><span className="text-[8px] text-indigo-500">Default</span></button><button onClick={() => { setIsSaveMenuOpen(false); saveProject(); }} className="w-full flex items-center justify-between gap-3 bg-slate-50 text-slate-700 px-3 py-2.5 rounded-xl text-[9px] font-black hover:bg-slate-100 transition"><span className="flex items-center gap-2"><FileJson size={14} /> DotPlate JSON</span><span className="text-[8px] text-slate-500">Legacy</span></button></div></div>)}</div><label className="p-2.5 bg-white border border-slate-100 text-indigo-600 rounded-xl shadow-sm cursor-pointer hover:bg-indigo-50 transition" title="Import JSON or MRPAF"><FolderOpen size={18} /><input type="file" accept=".json,.mrpaf,.mrpaf.json" className="hidden" onChange={loadProject} /></label><button onClick={exportImage} className="bg-indigo-600 text-white px-4 py-2 rounded-xl text-[9px] font-black shadow-lg uppercase">Export Image</button></div></div>
               <div className="space-y-6">
                 <div className="bg-slate-50 p-5 rounded-[1.5rem] border border-slate-100 space-y-4 shadow-inner">
                   <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest border-b border-indigo-100 pb-2">Project Metadata</p>
